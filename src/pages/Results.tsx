@@ -1,771 +1,486 @@
+import { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
+import type { ComponentType, ReactNode } from "react";
 import {
   Activity,
-  AlertTriangle,
   ArrowRight,
   CheckCircle2,
+  FileText,
+  FlaskConical,
   HeartPulse,
-  MapPin,
   Pill,
+  Salad,
   ShieldAlert,
-  Utensils,
+  ShieldCheck,
+  Sparkles,
+  Stethoscope,
+  TriangleAlert,
 } from "lucide-react";
 
-type AssessmentData = {
-  name: string;
-  age: string;
-  gender: string;
-  diabetesStatus: string;
-  diabetesType: string;
-  familyHistory: string;
-  otherConditions: string;
-  glucose: string;
-  hba1c: string;
-  height: string;
-  weight: string;
-  systolic: string;
-  diastolic: string;
-  symptoms: string[];
-  otherSymptoms: string;
-  locality: string;
-  report: string | null;
+import { useAssessment } from "../hooks/useAssessment";
+import { runAssessment } from "../lib/assessmentEngine";
+import type { AssessmentResult, ConcernLevel, IndicatorResult } from "../types/results";
+import type { AiExplanation } from "../types/ai";
+import { explainResults, isAiConfigured } from "../services/aiService";
+import Card from "../components/ui/Card";
+import Badge from "../components/ui/Badge";
+import { ratingToTone } from "../lib/indicatorTone";
+import Section from "../components/ui/Section";
+import Disclaimer from "../components/ui/Disclaimer";
+import EmergencyBanner from "../components/ui/EmergencyBanner";
+import FutureBadge from "../components/ui/FutureBadge";
+
+const REC_ICONS: Record<string, ComponentType<{ size?: number; className?: string }>> = {
+  Stethoscope,
+  FlaskConical,
+  Activity,
+  HeartPulse,
+  Salad,
+  ShieldCheck,
+  Pill,
 };
 
-type ConcernLevel = "Low" | "Moderate" | "High";
+const CONCERN_TONE: Record<ConcernLevel, { badge: "positive" | "caution" | "critical"; ring: string; icon: typeof CheckCircle2 }> = {
+  Low: { badge: "positive", ring: "border-emerald-400/20 bg-emerald-400/5", icon: CheckCircle2 },
+  Moderate: { badge: "caution", ring: "border-yellow-400/20 bg-yellow-400/5", icon: TriangleAlert },
+  High: { badge: "critical", ring: "border-red-400/20 bg-red-400/5", icon: ShieldAlert },
+};
 
 export default function Results() {
-  const storedData = localStorage.getItem("glucocare-assessment");
+  const { data, hasStarted, reset } = useAssessment();
 
-  if (!storedData) {
+  const result = useMemo<AssessmentResult>(() => runAssessment(data), [data]);
+
+  const [ai, setAi] = useState<AiExplanation | null>(null);
+  const [aiLoading, setAiLoading] = useState(false);
+
+  if (!hasStarted) {
     return <NoAssessment />;
   }
 
-  const data: AssessmentData = JSON.parse(storedData);
+  const requestAi = async () => {
+    setAiLoading(true);
+    const explanation = await explainResults({
+      result,
+      context: {
+        age: data.age,
+        gender: data.gender,
+        diabetesStatus: data.diabetesStatus,
+        familyHistory: data.familyHistory,
+        activityLevel: data.activityLevel,
+        smoking: data.smoking,
+        dietPattern: data.dietPattern,
+        symptoms: data.symptoms,
+      },
+    });
+    setAi(explanation);
+    setAiLoading(false);
+  };
 
-  const glucose = Number(data.glucose);
-  const hba1c = Number(data.hba1c);
-  const height = Number(data.height);
-  const weight = Number(data.weight);
-  const systolic = Number(data.systolic);
-  const diastolic = Number(data.diastolic);
-
-  const bmi =
-    height > 0 && weight > 0
-      ? weight / Math.pow(height / 100, 2)
-      : null;
-
-  const concern = calculateConcern(
-    glucose,
-    hba1c,
-    systolic,
-    diastolic,
-    data.symptoms.length
-  );
+  const tone = CONCERN_TONE[result.concernLevel];
+  const ConcernIcon = tone.icon;
 
   return (
-    <main className="min-h-screen bg-[#071512] text-white pt-28 pb-20">
-
+    <main className="min-h-screen pt-28 pb-20">
       <div className="max-w-7xl mx-auto px-6">
 
         {/* HEADER */}
-
         <div className="max-w-4xl">
-
           <p className="text-emerald-400 text-sm font-semibold uppercase tracking-widest">
             Assessment Complete
           </p>
-
-          <h1 className="text-4xl md:text-5xl font-bold mt-4">
-            Your health overview
-          </h1>
-
+          <h1 className="text-4xl md:text-5xl font-bold mt-4">Your health overview</h1>
           <p className="text-slate-400 mt-4 leading-relaxed">
-            Here's a summary based on the information you provided.
-            Review the information carefully and discuss concerns with a
-            qualified healthcare professional.
+            A summary based on the information you provided. Review it carefully
+            and discuss anything that concerns you with a qualified healthcare
+            professional.
           </p>
-
         </div>
 
+        {/* EMERGENCY BANNER */}
+        {result.redFlags.length > 0 && (
+          <div className="mt-8">
+            <EmergencyBanner reasons={result.redFlags.map((f) => f.reason)} />
+          </div>
+        )}
 
         {/* CONCERN CARD */}
-
         <section className="mt-10">
-
-          <div
-            className={`rounded-3xl border p-7 md:p-9 ${
-              concern === "Low"
-                ? "border-emerald-400/20 bg-emerald-400/5"
-                : concern === "Moderate"
-                ? "border-yellow-400/20 bg-yellow-400/5"
-                : "border-red-400/20 bg-red-400/5"
-            }`}
-          >
-
+          <div className={`rounded-3xl border p-7 md:p-9 ${tone.ring}`}>
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-7">
-
               <div className="flex gap-5">
-
-                <div
-                  className={`w-14 h-14 shrink-0 rounded-2xl flex items-center justify-center ${
-                    concern === "Low"
-                      ? "bg-emerald-400/10 text-emerald-400"
-                      : concern === "Moderate"
-                      ? "bg-yellow-400/10 text-yellow-400"
-                      : "bg-red-400/10 text-red-400"
-                  }`}
-                >
-                  {concern === "Low" ? (
-                    <CheckCircle2 size={28} />
-                  ) : concern === "Moderate" ? (
-                    <AlertTriangle size={28} />
-                  ) : (
-                    <ShieldAlert size={28} />
-                  )}
+                <div className="w-14 h-14 shrink-0 rounded-2xl bg-white/5 flex items-center justify-center">
+                  <ConcernIcon size={28} className="text-white" />
                 </div>
-
                 <div>
-
-                  <p className="text-sm text-slate-500">
-                    Overall assessment indicator
-                  </p>
-
-                  <h2 className="text-3xl font-bold mt-1">
-                    {concern} Concern
-                  </h2>
-
+                  <p className="text-sm text-slate-500">Overall assessment indicator</p>
+                  <div className="flex items-center gap-3 mt-1">
+                    <h2 className="text-3xl font-bold">{result.concernLevel} Concern</h2>
+                    <Badge tone={tone.badge}>Educational indicator</Badge>
+                  </div>
                   <p className="text-sm text-slate-400 mt-2 max-w-2xl">
-                    This is an educational indicator generated from the
-                    information entered in the assessment. It is not a
-                    medical diagnosis.
+                    {result.concernSummary}
                   </p>
-
                 </div>
-
               </div>
 
               <div className="text-left md:text-right">
-
-                <p className="text-xs text-slate-600">
-                  Patient
-                </p>
-
-                <p className="font-semibold mt-1">
-                  {data.name || "Patient"}
-                </p>
-
+                <p className="text-xs text-slate-600">Patient</p>
+                <p className="font-semibold mt-1">{data.name || "Not provided"}</p>
               </div>
-
             </div>
-
           </div>
-
+          <p className="text-xs text-slate-600 mt-3">
+            This indicator is generated from published reference criteria and the
+            information you entered. It is not a medical diagnosis.
+          </p>
         </section>
 
-
-        {/* HEALTH METRICS */}
-
-        <section className="mt-10">
-
-          <div className="flex items-end justify-between">
-
-            <div>
-              <p className="text-emerald-400 text-sm font-semibold uppercase tracking-widest">
-                Key indicators
-              </p>
-
-              <h2 className="text-2xl font-bold mt-2">
-                Health measurements
-              </h2>
-            </div>
-
-          </div>
-
-
+        {/* INDICATORS */}
+        <section className="mt-12">
+          <Section eyebrow="Key indicators" title="Health measurements" />
           <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-5 mt-6">
-
-            <MetricCard
-              icon={<Activity />}
-              title="Blood Glucose"
-              value={data.glucose || "—"}
-              unit="mg/dL"
-              status={getGlucoseStatus(glucose)}
-            />
-
-            <MetricCard
-              icon={<Activity />}
-              title="HbA1c"
-              value={data.hba1c || "—"}
-              unit="%"
-              status={getHba1cStatus(hba1c)}
-            />
-
-            <MetricCard
-              icon={<HeartPulse />}
-              title="Blood Pressure"
-              value={
-                systolic && diastolic
-                  ? `${systolic}/${diastolic}`
-                  : "—"
-              }
-              unit="mmHg"
-              status={getBPStatus(systolic, diastolic)}
-            />
-
-            <MetricCard
-              icon={<Activity />}
-              title="BMI"
-              value={bmi ? bmi.toFixed(1) : "—"}
-              unit=""
-              status={getBMIStatus(bmi)}
-            />
-
+            {result.indicators.map((indicator) => (
+              <IndicatorCard key={indicator.key} indicator={indicator} />
+            ))}
           </div>
-
         </section>
 
-
-        {/* TWO COLUMN */}
-
-        <section className="grid lg:grid-cols-2 gap-6 mt-10">
-
-          {/* SYMPTOMS */}
-
-          <div className="rounded-3xl border border-white/10 bg-[#0b1d19] p-7">
-
-            <div className="flex items-center gap-3">
-
-              <div className="w-11 h-11 rounded-xl bg-emerald-400/10 flex items-center justify-center">
-                <HeartPulse
-                  size={21}
-                  className="text-emerald-400"
-                />
-              </div>
-
-              <div>
-
-                <p className="text-xs text-slate-600 uppercase tracking-widest">
-                  Symptoms
-                </p>
-
-                <h2 className="text-xl font-bold mt-1">
-                  Reported symptoms
-                </h2>
-
-              </div>
-
-            </div>
-
-
-            {data.symptoms.length === 0 &&
-            !data.otherSymptoms ? (
-              <div className="mt-7 p-5 rounded-2xl bg-white/[0.03]">
-
+        {/* WHAT THIS MEANS */}
+        <section className="mt-12">
+          <Section
+            eyebrow="Understanding your results"
+            title="What your results mean"
+            description="The reference criteria used for each indicator. GlucoCare cannot tell whether a glucose reading was taken fasting or randomly."
+          />
+          <div className="grid md:grid-cols-2 gap-5 mt-6">
+            {result.indicators
+              .filter((i) => i.rating !== "not-provided")
+              .map((indicator) => (
+                <Card key={indicator.key}>
+                  <div className="flex items-center justify-between">
+                    <h3 className="font-semibold">{indicator.label}</h3>
+                    <Badge tone={ratingToTone(indicator.rating)}>{indicator.statusText}</Badge>
+                  </div>
+                  <p className="text-sm text-slate-500 leading-relaxed mt-3">
+                    {indicator.referenceText}{" "}
+                    <span className="text-slate-600">{indicator.citation}</span>
+                  </p>
+                </Card>
+              ))}
+            {result.indicators.every((i) => i.rating === "not-provided") && (
+              <Card>
                 <p className="text-sm text-slate-500">
-                  No symptoms were selected.
+                  No measurements were entered, so there is nothing to compare
+                  against reference criteria. You can add measurements in the
+                  assessment.
                 </p>
+              </Card>
+            )}
+          </div>
+        </section>
 
-              </div>
+        {/* RISK FACTORS */}
+        <section className="mt-12">
+          <Section
+            eyebrow="Contributing factors"
+            title="Risk factors identified"
+            description="Factors from your input that are associated with diabetes risk or that affect management."
+          />
+          {result.riskFactors.length === 0 ? (
+            <Card className="mt-6">
+              <p className="text-sm text-slate-500">
+                No specific risk factors were identified from the information
+                provided.
+              </p>
+            </Card>
+          ) : (
+            <div className="grid md:grid-cols-2 gap-4 mt-6">
+              {result.riskFactors.map((factor) => (
+                <div
+                  key={factor.label}
+                  className="flex gap-3 rounded-2xl border border-white/10 bg-[#0b1d19] p-5"
+                >
+                  <TriangleAlert size={18} className="text-yellow-400 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-sm font-semibold">{factor.label}</p>
+                    <p className="text-xs text-slate-500 mt-1 leading-relaxed">{factor.detail}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        {/* TWO COLUMN: symptoms + patient info */}
+        <section className="grid lg:grid-cols-2 gap-6 mt-12">
+          <Card>
+            <CardHead icon={<HeartPulse size={21} className="text-emerald-400" />} eyebrow="Symptoms" title="Reported symptoms" />
+            {data.symptoms.length === 0 && !data.otherSymptoms && data.warningSigns.length === 0 ? (
+              <p className="text-sm text-slate-500 mt-7">No symptoms were selected.</p>
             ) : (
               <div className="flex flex-wrap gap-2 mt-7">
-
-                {data.symptoms.map((symptom) => (
-                  <span
-                    key={symptom}
-                    className="px-3 py-2 rounded-lg bg-emerald-400/10 border border-emerald-400/10 text-emerald-300 text-xs"
-                  >
-                    {symptom}
+                {data.symptoms.map((s) => (
+                  <span key={s} className="px-3 py-2 rounded-lg bg-emerald-400/10 border border-emerald-400/10 text-emerald-300 text-xs">
+                    {s}
                   </span>
                 ))}
-
+                {data.warningSigns.map((s) => (
+                  <span key={s} className="px-3 py-2 rounded-lg bg-red-400/10 border border-red-400/20 text-red-300 text-xs">
+                    {s}
+                  </span>
+                ))}
                 {data.otherSymptoms && (
                   <span className="px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-slate-400 text-xs">
                     {data.otherSymptoms}
                   </span>
                 )}
-
               </div>
             )}
+          </Card>
 
-          </div>
-
-
-          {/* PATIENT INFORMATION */}
-
-          <div className="rounded-3xl border border-white/10 bg-[#0b1d19] p-7">
-
-            <div className="flex items-center gap-3">
-
-              <div className="w-11 h-11 rounded-xl bg-emerald-400/10 flex items-center justify-center">
-                <Activity
-                  size={21}
-                  className="text-emerald-400"
-                />
-              </div>
-
-              <div>
-
-                <p className="text-xs text-slate-600 uppercase tracking-widest">
-                  Profile
-                </p>
-
-                <h2 className="text-xl font-bold mt-1">
-                  Patient information
-                </h2>
-
-              </div>
-
-            </div>
-
-
+          <Card>
+            <CardHead icon={<Activity size={21} className="text-emerald-400" />} eyebrow="Profile" title="Patient information" />
             <div className="grid grid-cols-2 gap-5 mt-7">
-
-              <InfoItem
-                label="Age"
-                value={data.age || "Not provided"}
-              />
-
-              <InfoItem
-                label="Gender"
-                value={data.gender || "Not provided"}
-              />
-
-              <InfoItem
-                label="Diabetes"
-                value={data.diabetesStatus || "Not provided"}
-              />
-
-              <InfoItem
-                label="Diabetes Type"
-                value={data.diabetesType || "—"}
-              />
-
-              <InfoItem
-                label="Family History"
-                value={data.familyHistory || "Not provided"}
-              />
-
-              <InfoItem
-                label="Locality"
-                value={data.locality || "Not provided"}
-              />
-
+              <Info label="Age" value={data.age || "Not provided"} />
+              <Info label="Gender" value={data.gender || "Not provided"} />
+              <Info label="Diabetes" value={data.diabetesStatus || "Not provided"} />
+              <Info label="Diabetes Type" value={data.diabetesType || "--"} />
+              <Info label="Family History" value={data.familyHistory || "Not provided"} />
+              <Info label="Activity" value={data.activityLevel || "Not provided"} />
+              <Info label="Smoking" value={data.smoking || "Not provided"} />
+              <Info label="Locality" value={data.locality || "Not provided"} />
             </div>
-
-          </div>
-
+          </Card>
         </section>
-
 
         {/* RECOMMENDATIONS */}
-
-        <section className="mt-10">
-
-          <div>
-
-            <p className="text-emerald-400 text-sm font-semibold uppercase tracking-widest">
-              General guidance
-            </p>
-
-            <h2 className="text-2xl font-bold mt-2">
-              Recommendations
-            </h2>
-
-            <p className="text-sm text-slate-500 mt-2">
-              General educational suggestions based on the information
-              provided.
-            </p>
-
-          </div>
-
-
+        <section className="mt-12">
+          <Section
+            eyebrow="General guidance"
+            title="Recommendations"
+            description="General educational suggestions based on your input. None of this is a prescription."
+          />
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-5 mt-6">
-
-            <Recommendation
-              icon={<Activity />}
-              title="Monitor your health"
-              description="Keep track of relevant glucose measurements and follow the monitoring plan recommended by your healthcare professional."
-            />
-
-            <Recommendation
-              icon={<Utensils />}
-              title="Focus on balanced nutrition"
-              description="Prefer balanced meals with vegetables, whole grains, appropriate protein and sensible portions."
-            />
-
-            <Recommendation
-              icon={<HeartPulse />}
-              title="Stay physically active"
-              description="Regular physical activity can support overall health. Choose activities appropriate for your condition."
-            />
-
-            <Recommendation
-              icon={<Pill />}
-              title="Medication safety"
-              description="Do not start, stop or change diabetes medication based only on this assessment. Follow your clinician's instructions."
-            />
-
-            <Recommendation
-              icon={<ShieldAlert />}
-              title="Know when to seek help"
-              description="If you experience severe or rapidly worsening symptoms, seek appropriate medical attention promptly."
-            />
-
-            <Recommendation
-              icon={<FileIcon />}
-              title="Keep medical records"
-              description="Keep your test results and medical reports organized so they can be discussed with your healthcare professional."
-            />
-
+            {result.recommendations.map((rec) => {
+              const Icon = REC_ICONS[rec.icon] ?? Activity;
+              return (
+                <Card key={rec.id}>
+                  <div className="w-10 h-10 rounded-xl bg-emerald-400/10 flex items-center justify-center text-emerald-400">
+                    <Icon size={20} />
+                  </div>
+                  <h3 className="font-semibold mt-5">{rec.title}</h3>
+                  <p className="text-sm text-slate-500 leading-relaxed mt-2">{rec.detail}</p>
+                </Card>
+              );
+            })}
           </div>
-
         </section>
 
-
-        {/* HEALTHCARE */}
-
-        <section className="mt-10">
-
-          <div className="rounded-3xl border border-white/10 bg-[#0b1d19] p-7 md:p-9">
-
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
-
-              <div className="flex gap-4">
-
-                <div className="w-12 h-12 rounded-xl bg-emerald-400/10 flex items-center justify-center shrink-0">
-                  <MapPin
-                    className="text-emerald-400"
-                    size={23}
-                  />
-                </div>
-
-                <div>
-
-                  <p className="text-xs text-slate-600 uppercase tracking-widest">
-                    Healthcare
-                  </p>
-
-                  <h2 className="text-xl font-bold mt-1">
-                    Find healthcare near you
-                  </h2>
-
-                  <p className="text-sm text-slate-500 mt-2">
-                    {data.locality
-                      ? `Healthcare search will be available for ${data.locality}.`
-                      : "Add your locality in the assessment to find nearby healthcare facilities."}
-                  </p>
-
-                </div>
-
-              </div>
-
-              <a
-                href="/hospitals"
-                className="inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl border border-white/10 text-sm font-semibold hover:bg-white/5 transition"
-              >
-                Explore Healthcare
-                <ArrowRight size={16} />
-              </a>
-
-            </div>
-
+        {/* AI EXPLANATION (Stage 8) */}
+        <section className="mt-12">
+          <div className="flex items-center gap-3">
+            <Section eyebrow="Optional" title="AI-assisted explanation" />
+            {!isAiConfigured && <FutureBadge label="Not connected yet" />}
           </div>
 
-        </section>
-
-
-        {/* MEDICATION DISCLAIMER */}
-
-        <section className="mt-8">
-
-          <div className="rounded-2xl border border-yellow-400/10 bg-yellow-400/[0.03] p-5">
-
-            <div className="flex gap-3">
-
-              <Pill
-                className="text-yellow-400 shrink-0"
-                size={20}
-              />
-
+          <Card className="mt-6">
+            {!isAiConfigured ? (
+              <p className="text-sm text-slate-400 leading-relaxed">
+                An AI assistant can explain these results in simpler language,
+                define medical terms and suggest what kind of professional to
+                consult. It is switched off here because no AI service is
+                configured (see <span className="text-slate-300">docs/AI-SETUP.md</span>).
+                When enabled it never diagnoses or recommends medication.
+              </p>
+            ) : ai === null ? (
               <div>
-
-                <p className="text-sm font-semibold">
-                  Medication reminder
+                <p className="text-sm text-slate-400 leading-relaxed">
+                  Generate a plain-language explanation of the results above.
+                  This does not diagnose or prescribe.
                 </p>
-
-                <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-                  GlucoCare does not prescribe or recommend specific
-                  medicines or dosages. Medication decisions should always
-                  be made with a qualified healthcare professional.
-                </p>
-
+                <button
+                  onClick={requestAi}
+                  disabled={aiLoading}
+                  className="mt-4 inline-flex items-center gap-2 px-5 py-3 rounded-xl bg-emerald-400 text-[#071512] font-bold hover:bg-emerald-300 transition disabled:opacity-50"
+                >
+                  <Sparkles size={16} />
+                  {aiLoading ? "Generating..." : "Explain my results"}
+                </button>
               </div>
-
-            </div>
-
-          </div>
-
+            ) : ai.status === "error" ? (
+              <p className="text-sm text-red-400">
+                The explanation could not be generated ({ai.errorMessage}). Please try again later.
+              </p>
+            ) : (
+              <AiResult ai={ai} />
+            )}
+          </Card>
         </section>
 
+        {/* HEALTHCARE CTA */}
+        <section className="mt-12">
+          <Card>
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
+              <CardHead
+                icon={<Stethoscope size={22} className="text-emerald-400" />}
+                eyebrow="Healthcare"
+                title="Find healthcare near you"
+              />
+              <Link
+                to="/healthcare"
+                className="inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl border border-white/10 text-sm font-semibold hover:bg-white/5 transition shrink-0"
+              >
+                {data.locality ? `Search near ${data.locality}` : "Open healthcare finder"}
+                <ArrowRight size={16} />
+              </Link>
+            </div>
+          </Card>
+        </section>
 
-        {/* FOOTER NOTE */}
+        {/* MEDICATION REMINDER */}
+        <section className="mt-8">
+          <div className="rounded-2xl border border-yellow-400/10 bg-yellow-400/[0.03] p-5">
+            <div className="flex gap-3">
+              <Pill className="text-yellow-400 shrink-0" size={20} />
+              <div>
+                <p className="text-sm font-semibold">Medication reminder</p>
+                <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                  GlucoCare does not prescribe or recommend specific medicines or
+                  dosages. Medication decisions should always be made with a
+                  qualified healthcare professional.
+                </p>
+              </div>
+            </div>
+          </div>
+        </section>
 
-        <div className="text-center mt-12">
-
-          <p className="text-xs text-slate-600 max-w-2xl mx-auto leading-relaxed">
-            This assessment is for educational and informational purposes
-            only. The indicators shown here are not a diagnosis and should
-            not be used to make medical decisions without professional
-            guidance.
-          </p>
-
+        {/* FOOTER ACTIONS */}
+        <div className="mt-12 flex flex-col sm:flex-row items-center justify-between gap-4">
+          <Disclaimer className="mx-0 text-left" />
+          <button
+            onClick={() => {
+              if (confirm("This will delete the assessment saved in this browser. Continue?")) {
+                reset();
+              }
+            }}
+            className="text-xs text-slate-500 hover:text-red-400 transition shrink-0"
+          >
+            Clear my data
+          </button>
         </div>
-
       </div>
-
     </main>
   );
 }
 
+/* ------------------------------------------------------------------ */
 
-/* =========================================================
-   CONCERN CALCULATION
-========================================================= */
-
-function calculateConcern(
-  glucose: number,
-  hba1c: number,
-  systolic: number,
-  diastolic: number,
-  symptomCount: number
-): ConcernLevel {
-  let score = 0;
-
-  if (glucose > 0) {
-    if (glucose >= 200) score += 3;
-    else if (glucose >= 126) score += 2;
-    else if (glucose >= 100) score += 1;
-  }
-
-  if (hba1c > 0) {
-    if (hba1c >= 6.5) score += 3;
-    else if (hba1c >= 5.7) score += 1;
-  }
-
-  if (systolic > 0 && diastolic > 0) {
-    if (systolic >= 140 || diastolic >= 90) score += 2;
-    else if (systolic >= 130 || diastolic >= 80) score += 1;
-  }
-
-  if (symptomCount >= 4) score += 2;
-  else if (symptomCount >= 2) score += 1;
-
-  if (score >= 5) return "High";
-  if (score >= 2) return "Moderate";
-
-  return "Low";
-}
-
-
-/* =========================================================
-   STATUS HELPERS
-========================================================= */
-
-function getGlucoseStatus(value: number) {
-  if (!value) return "Not provided";
-  if (value >= 200) return "High";
-  if (value >= 126) return "Elevated";
-  if (value >= 100) return "Borderline";
-  return "Within reference range";
-}
-
-function getHba1cStatus(value: number) {
-  if (!value) return "Not provided";
-  if (value >= 6.5) return "Elevated";
-  if (value >= 5.7) return "Borderline";
-  return "Within reference range";
-}
-
-function getBPStatus(systolic: number, diastolic: number) {
-  if (!systolic || !diastolic) return "Not provided";
-  if (systolic >= 140 || diastolic >= 90) return "Elevated";
-  if (systolic >= 130 || diastolic >= 80) return "Borderline";
-  return "Within reference range";
-}
-
-function getBMIStatus(bmi: number | null) {
-  if (!bmi) return "Not provided";
-  if (bmi < 18.5) return "Below reference";
-  if (bmi >= 25) return "Above reference";
-  return "Within reference range";
-}
-
-
-/* =========================================================
-   COMPONENTS
-========================================================= */
-
-function MetricCard({
-  icon,
-  title,
-  value,
-  unit,
-  status,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  value: string;
-  unit: string;
-  status: string;
-}) {
+function IndicatorCard({ indicator }: { indicator: IndicatorResult }) {
   return (
     <div className="rounded-2xl border border-white/10 bg-[#0b1d19] p-6">
-
       <div className="flex items-center gap-3">
-
         <div className="w-10 h-10 rounded-xl bg-emerald-400/10 flex items-center justify-center text-emerald-400">
-          {icon}
+          <Activity size={18} />
         </div>
-
-        <span className="text-sm text-slate-500">
-          {title}
-        </span>
-
+        <span className="text-sm text-slate-500">{indicator.label}</span>
       </div>
-
       <div className="mt-6">
-
-        <span className="text-3xl font-bold">
-          {value}
-        </span>
-
-        <span className="text-xs text-slate-600 ml-1">
-          {unit}
-        </span>
-
+        <span className="text-3xl font-bold">{indicator.value}</span>
+        <span className="text-xs text-slate-600 ml-1">{indicator.unit}</span>
       </div>
-
-      <p className="text-xs text-slate-500 mt-3">
-        {status}
-      </p>
-
+      <div className="mt-3">
+        <Badge tone={ratingToTone(indicator.rating)}>{indicator.statusText}</Badge>
+      </div>
     </div>
   );
 }
 
+function AiResult({ ai }: { ai: AiExplanation }) {
+  return (
+    <div className="space-y-5">
+      <p className="text-sm text-slate-300 leading-relaxed">{ai.summary}</p>
 
-function InfoItem({
-  label,
-  value,
-}: {
-  label: string;
-  value: string;
-}) {
+      {ai.termNotes.length > 0 && (
+        <div>
+          <p className="text-xs uppercase tracking-widest text-emerald-400 font-semibold">Terms explained</p>
+          <div className="mt-2 space-y-2">
+            {ai.termNotes.map((note) => (
+              <p key={note.term} className="text-sm text-slate-400">
+                <span className="text-white font-medium">{note.term}:</span> {note.meaning}
+              </p>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {ai.suggestions.length > 0 && (
+        <div>
+          <p className="text-xs uppercase tracking-widest text-emerald-400 font-semibold">Suggestions</p>
+          <ul className="mt-2 space-y-1">
+            {ai.suggestions.map((s) => (
+              <li key={s} className="text-sm text-slate-400 flex gap-2">
+                <CheckCircle2 size={15} className="text-emerald-400 shrink-0 mt-0.5" />
+                {s}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {ai.whoToSee && (
+        <p className="text-sm text-slate-400">
+          <span className="text-white font-medium">Who to consider seeing:</span> {ai.whoToSee}
+        </p>
+      )}
+
+      <p className="text-xs text-slate-600 leading-relaxed border-t border-white/10 pt-4">
+        {ai.disclaimer}
+      </p>
+    </div>
+  );
+}
+
+function CardHead({ icon, eyebrow, title }: { icon: ReactNode; eyebrow: string; title: string }) {
+  return (
+    <div className="flex items-center gap-3">
+      <div className="w-11 h-11 rounded-xl bg-emerald-400/10 flex items-center justify-center">{icon}</div>
+      <div>
+        <p className="text-xs text-slate-600 uppercase tracking-widest">{eyebrow}</p>
+        <h2 className="text-xl font-bold mt-1">{title}</h2>
+      </div>
+    </div>
+  );
+}
+
+function Info({ label, value }: { label: string; value: string }) {
   return (
     <div>
-
-      <p className="text-xs text-slate-600">
-        {label}
-      </p>
-
-      <p className="text-sm text-slate-300 mt-1">
-        {value}
-      </p>
-
+      <p className="text-xs text-slate-600">{label}</p>
+      <p className="text-sm text-slate-300 mt-1">{value}</p>
     </div>
   );
 }
-
-
-function Recommendation({
-  icon,
-  title,
-  description,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  description: string;
-}) {
-  return (
-    <div className="rounded-2xl border border-white/10 bg-[#0b1d19] p-6">
-
-      <div className="w-10 h-10 rounded-xl bg-emerald-400/10 flex items-center justify-center text-emerald-400">
-        {icon}
-      </div>
-
-      <h3 className="font-semibold mt-5">
-        {title}
-      </h3>
-
-      <p className="text-sm text-slate-500 leading-relaxed mt-2">
-        {description}
-      </p>
-
-    </div>
-  );
-}
-
-
-function FileIcon() {
-  return <FileTextIcon />;
-}
-
-function FileTextIcon() {
-  return (
-    <svg
-      width="20"
-      height="20"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
-      <path d="M14 2v6h6" />
-      <path d="M8 13h8" />
-      <path d="M8 17h5" />
-    </svg>
-  );
-}
-
-
-/* =========================================================
-   NO ASSESSMENT
-========================================================= */
 
 function NoAssessment() {
   return (
-    <main className="min-h-screen bg-[#071512] text-white pt-32 px-6">
-
+    <main className="min-h-screen pt-32 px-6">
       <div className="max-w-xl mx-auto text-center py-24">
-
         <div className="w-16 h-16 mx-auto rounded-2xl bg-emerald-400/10 flex items-center justify-center">
-          <Activity
-            className="text-emerald-400"
-            size={28}
-          />
+          <FileText className="text-emerald-400" size={28} />
         </div>
-
-        <h1 className="text-4xl font-bold mt-7">
-          No assessment found
-        </h1>
-
+        <h1 className="text-4xl font-bold mt-7">No assessment found</h1>
         <p className="text-slate-500 mt-4">
-          Complete the diabetes health assessment first to view your
-          results.
+          Complete the diabetes health assessment first to view your results.
         </p>
-
-        <a
-          href="/assessment"
+        <Link
+          to="/assessment"
           className="inline-flex items-center gap-2 mt-8 px-6 py-3 rounded-xl bg-emerald-400 text-[#071512] font-bold"
         >
           Start Assessment
           <ArrowRight size={17} />
-        </a>
-
+        </Link>
       </div>
-
     </main>
   );
 }

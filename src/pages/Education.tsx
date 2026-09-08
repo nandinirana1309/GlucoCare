@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import {
   Activity,
   AlertTriangle,
@@ -8,6 +9,8 @@ import {
   ShieldCheck,
   Utensils,
 } from "lucide-react";
+
+import Disclaimer from "../components/ui/Disclaimer";
 
 const diabetesTypes = [
   {
@@ -436,25 +439,20 @@ export default function Education() {
             health information.
           </p>
 
-          <a
-            href="/assessment"
+          <Link
+            to="/assessment"
             className="inline-flex items-center gap-2 mt-7 px-6 py-3 rounded-xl bg-emerald-400 text-[#071512] font-bold hover:bg-emerald-300 transition"
           >
             Start Assessment
             <ArrowRight size={17} />
-          </a>
+          </Link>
 
         </section>
 
 
         {/* DISCLAIMER */}
 
-        <p className="text-center text-xs text-slate-600 max-w-3xl mx-auto mt-16 leading-relaxed">
-          The information on this page is intended for general educational
-          purposes and does not constitute medical advice or a diagnosis.
-          Always consult a qualified healthcare professional for personal
-          medical guidance.
-        </p>
+        <Disclaimer className="mt-16" />
 
       </div>
 

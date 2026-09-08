@@ -94,20 +94,28 @@ export default function Healthcare() {
 
           {state.status === "loading" && (
             <p className="text-slate-500 text-sm">
-              Looking up your locality and searching nearby facilities...
+              Looking up your locality and searching nearby facilities&hellip; this
+              can take a few seconds.
             </p>
           )}
 
           {state.status === "error" && (
             <div className="rounded-2xl border border-red-400/20 bg-red-400/5 p-6">
               <p className="text-sm text-red-300">{state.message}</p>
+              <button
+                onClick={search}
+                className="mt-3 inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-white/10 text-xs font-semibold hover:bg-white/5 transition"
+              >
+                <Search size={13} />
+                Try again
+              </button>
             </div>
           )}
 
           {state.status === "empty" && (
             <div className="rounded-2xl border border-white/10 bg-[#0b1d19] p-6">
               <p className="text-sm text-slate-400">
-                No mapped hospitals or clinics were found within about 7 km of{" "}
+                No mapped hospitals or clinics were found within about 15 km of{" "}
                 <span className="text-white">{state.origin.label}</span>. Try a
                 nearby larger town, or search again later.
               </p>

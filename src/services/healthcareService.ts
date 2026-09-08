@@ -2,15 +2,18 @@
  * GlucoCare - healthcare finder service (Stage 5)
  * -------------------------------------------------------------
  * Real data from OpenStreetMap. No API key, no billing.
- *   1. geocodeLocality()  -> Nominatim turns "Vellore" into coordinates
- *   2. findFacilities()    -> Overpass finds hospitals / clinics / doctors nearby
+ *   1. geocodeLocality()  -> turn "Vellore" into coordinates (Nominatim, then
+ *                            Photon as a fallback)
+ *   2. findFacilities()    -> find hospitals / clinics / doctors nearby
+ *                            (Overpass API - several public servers are tried
+ *                            in turn because any single one is often overloaded)
  *
- * Usage notes / limits (fine for a student project, not for heavy traffic):
- *   - Nominatim asks for <= 1 request/second and a valid Referer (the browser
- *     sends this automatically).
- *   - Results depend on what volunteers have mapped in that area, so some
- *     places may be missing or lack a phone number.
- *   - Always show "(c) OpenStreetMap contributors".
+ * Notes:
+ *   - Public Overpass servers frequently return 429/504 or time out. This
+ *     module tries a list of them and only fails if every one fails.
+ *   - Results depend on what volunteers have mapped, so some places may be
+ *     missing or lack a phone number. Always show
+ *     "(c) OpenStreetMap contributors".
  */
 
 import type {
@@ -19,9 +22,9 @@ import type {
   GeoPoint,
 } from "../types/healthcare";
 
-const NOMINATIM = "https://nominatim.openstreetmap.org/search";
-const OVERPASS = "https://overpass-api.de/api/interpreter";
-const SEARCH_RADIUS_M = 7000;
+/* ------------------------------------------------------------------ */
+/*  low-level fetch with timeout                                       */
+/* ------------------------------------------------------------------ */
 
 async function fetchWithTimeout(
   url: string,
@@ -37,32 +40,101 @@ async function fetchWithTimeout(
   }
 }
 
-export async function geocodeLocality(query: string): Promise<GeoPoint> {
-  const url = `${NOMINATIM}?format=jsonv2&limit=1&q=${encodeURIComponent(query)}`;
-  const response = await fetchWithTimeout(url, { headers: { Accept: "application/json" } }, 15000);
+/* ------------------------------------------------------------------ */
+/*  1. geocoding                                                       */
+/* ------------------------------------------------------------------ */
 
-  if (!response.ok) {
-    throw new Error("Location lookup failed. Please try again in a moment.");
+const NOMINATIM = "https://nominatim.openstreetmap.org/search";
+const PHOTON = "https://photon.komoot.io/api/";
+
+async function geocodeNominatim(query: string): Promise<GeoPoint | null> {
+  try {
+    const url = `${NOMINATIM}?format=jsonv2&addressdetails=0&limit=1&q=${encodeURIComponent(
+      query,
+    )}`;
+    const res = await fetchWithTimeout(
+      url,
+      { headers: { Accept: "application/json" } },
+      12000,
+    );
+    if (!res.ok) return null;
+    const rows = (await res.json()) as Array<{
+      lat: string;
+      lon: string;
+      display_name: string;
+    }>;
+    if (!rows.length) return null;
+    return {
+      lat: parseFloat(rows[0].lat),
+      lon: parseFloat(rows[0].lon),
+      label: rows[0].display_name,
+    };
+  } catch {
+    return null;
   }
-
-  const rows = (await response.json()) as Array<{
-    lat: string;
-    lon: string;
-    display_name: string;
-  }>;
-
-  if (rows.length === 0) {
-    throw new Error(`Could not find "${query}". Try adding a state or country.`);
-  }
-
-  return {
-    lat: parseFloat(rows[0].lat),
-    lon: parseFloat(rows[0].lon),
-    label: rows[0].display_name,
-  };
 }
 
-function haversineKm(aLat: number, aLon: number, bLat: number, bLon: number): number {
+async function geocodePhoton(query: string): Promise<GeoPoint | null> {
+  try {
+    const url = `${PHOTON}?limit=1&q=${encodeURIComponent(query)}`;
+    const res = await fetchWithTimeout(
+      url,
+      { headers: { Accept: "application/json" } },
+      12000,
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      features?: Array<{
+        geometry: { coordinates: [number, number] };
+        properties: Record<string, string>;
+      }>;
+    };
+    const f = data.features?.[0];
+    if (!f) return null;
+    const [lon, lat] = f.geometry.coordinates;
+    const p = f.properties;
+    const label = [p.name, p.city, p.state, p.country].filter(Boolean).join(", ");
+    return { lat, lon, label: label || query };
+  } catch {
+    return null;
+  }
+}
+
+export async function geocodeLocality(query: string): Promise<GeoPoint> {
+  const trimmed = query.trim();
+  if (!trimmed) {
+    throw new Error("Please enter a city or locality.");
+  }
+
+  const hit =
+    (await geocodeNominatim(trimmed)) ?? (await geocodePhoton(trimmed));
+
+  if (!hit) {
+    throw new Error(
+      `Could not find "${trimmed}". Try adding a district, state or country ` +
+        `(for example "Velachery, Chennai, India").`,
+    );
+  }
+  return hit;
+}
+
+/* ------------------------------------------------------------------ */
+/*  2. nearby facilities (Overpass)                                    */
+/* ------------------------------------------------------------------ */
+
+/** Public Overpass endpoints, tried in order. All send permissive CORS. */
+const OVERPASS_ENDPOINTS = [
+  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+];
+
+function haversineKm(
+  aLat: number,
+  aLon: number,
+  bLat: number,
+  bLon: number,
+): number {
   const R = 6371;
   const dLat = ((bLat - aLat) * Math.PI) / 180;
   const dLon = ((bLon - aLon) * Math.PI) / 180;
@@ -76,10 +148,11 @@ function haversineKm(aLat: number, aLon: number, bLat: number, bLon: number): nu
 
 function categorise(tags: Record<string, string>): FacilityCategory {
   const amenity = tags.amenity;
-  if (amenity === "hospital") return "Hospital";
-  if (amenity === "clinic") return "Clinic";
-  if (amenity === "doctors") return "Doctor";
-  if (amenity === "pharmacy") return "Pharmacy";
+  const healthcare = tags.healthcare;
+  if (amenity === "hospital" || healthcare === "hospital") return "Hospital";
+  if (amenity === "clinic" || healthcare === "clinic") return "Clinic";
+  if (amenity === "doctors" || healthcare === "doctor") return "Doctor";
+  if (amenity === "pharmacy" || healthcare === "pharmacy") return "Pharmacy";
   return "Healthcare facility";
 }
 
@@ -103,36 +176,70 @@ interface OverpassElement {
   tags?: Record<string, string>;
 }
 
-export async function findFacilities(origin: GeoPoint): Promise<Facility[]> {
-  const q = `
-    [out:json][timeout:25];
-    (
-      nwr["amenity"~"^(hospital|clinic|doctors|pharmacy)$"](around:${SEARCH_RADIUS_M},${origin.lat},${origin.lon});
-      nwr["healthcare"](around:${SEARCH_RADIUS_M},${origin.lat},${origin.lon});
-    );
-    out center tags 60;
-  `;
+function overpassQuery(lat: number, lon: number, radiusM: number): string {
+  return `[out:json][timeout:20];
+(
+  nwr["amenity"~"^(hospital|clinic|doctors|pharmacy)$"](around:${radiusM},${lat},${lon});
+  nwr["healthcare"~"^(hospital|clinic|doctor|centre|pharmacy)$"](around:${radiusM},${lat},${lon});
+);
+out center tags 60;`;
+}
 
-  const response = await fetchWithTimeout(
-    OVERPASS,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: `data=${encodeURIComponent(q)}`,
-    },
-    30000,
-  );
+/** POST the query to each endpoint until one returns valid JSON. */
+async function runOverpass(query: string): Promise<OverpassElement[]> {
+  let lastReason = "";
 
-  if (!response.ok) {
-    throw new Error("The facility search service is busy. Please try again shortly.");
+  for (const endpoint of OVERPASS_ENDPOINTS) {
+    try {
+      const res = await fetchWithTimeout(
+        endpoint,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: `data=${encodeURIComponent(query)}`,
+        },
+        20000,
+      );
+
+      if (!res.ok) {
+        lastReason = `server ${res.status}`;
+        continue;
+      }
+
+      const contentType = res.headers.get("content-type") ?? "";
+      if (!contentType.includes("json")) {
+        lastReason = "non-JSON response";
+        continue;
+      }
+
+      const payload = (await res.json()) as { elements?: OverpassElement[] };
+      if (!Array.isArray(payload.elements)) {
+        lastReason = "unexpected response shape";
+        continue;
+      }
+      return payload.elements;
+    } catch (error) {
+      lastReason =
+        error instanceof DOMException && error.name === "AbortError"
+          ? "timed out"
+          : "network error";
+    }
   }
 
-  const payload = (await response.json()) as { elements: OverpassElement[] };
+  throw new Error(
+    `The facility search service is busy right now (${lastReason}). ` +
+      `Please try again in a minute.`,
+  );
+}
 
+function toFacilities(
+  elements: OverpassElement[],
+  origin: GeoPoint,
+): Facility[] {
   const seen = new Set<string>();
   const facilities: Facility[] = [];
 
-  for (const el of payload.elements) {
+  for (const el of elements) {
     const tags = el.tags ?? {};
     const lat = el.lat ?? el.center?.lat;
     const lon = el.lon ?? el.center?.lon;
@@ -149,7 +256,8 @@ export async function findFacilities(origin: GeoPoint): Promise<Facility[]> {
       category: categorise(tags),
       lat,
       lon,
-      distanceKm: Math.round(haversineKm(origin.lat, origin.lon, lat, lon) * 10) / 10,
+      distanceKm:
+        Math.round(haversineKm(origin.lat, origin.lon, lat, lon) * 10) / 10,
       address: buildAddress(tags),
       phone: tags.phone ?? tags["contact:phone"],
       osmUrl: `https://www.openstreetmap.org/${el.type}/${el.id}`,
@@ -159,4 +267,18 @@ export async function findFacilities(origin: GeoPoint): Promise<Facility[]> {
 
   facilities.sort((a, b) => a.distanceKm - b.distanceKm);
   return facilities.slice(0, 24);
+}
+
+export async function findFacilities(origin: GeoPoint): Promise<Facility[]> {
+  // First pass: 7 km.
+  let elements = await runOverpass(overpassQuery(origin.lat, origin.lon, 7000));
+  let facilities = toFacilities(elements, origin);
+
+  // Nothing mapped nearby -> widen the search once to 15 km.
+  if (facilities.length === 0) {
+    elements = await runOverpass(overpassQuery(origin.lat, origin.lon, 15000));
+    facilities = toFacilities(elements, origin);
+  }
+
+  return facilities;
 }

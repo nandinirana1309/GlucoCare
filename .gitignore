@@ -30,3 +30,6 @@ dist-ssr
 
 # End-to-end test artefacts (generated)
 e2e/.fixtures
+
+# Supabase CLI cache
+supabase/.temp/

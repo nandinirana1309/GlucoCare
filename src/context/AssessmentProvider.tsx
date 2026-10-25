@@ -1,13 +1,15 @@
 /**
- * GlucoCare - assessment provider
+ * GlucoCare - assessment (draft) provider
  * -------------------------------------------------------------
- * Holds the one shared "current assessment" for the whole app.
+ * Holds the CURRENT DRAFT assessment the form edits.
  *
- *  - Loads any saved assessment on start.
- *  - Auto-saves every change (a half-finished assessment survives a refresh)
- *    BUT never creates a saved record for a blank assessment, so the
- *    "No assessment found" screen on /results still works.
- *  - `submit()` saves and (Stage 7) pushes a copy to Supabase if configured.
+ *  - Loads any saved draft on start.
+ *  - Auto-saves every change to this device (a half-finished assessment
+ *    survives a refresh) BUT never creates a saved record for a blank draft.
+ *  - Completed assessments are NOT kept here: the Assessment page saves them
+ *    to history through HealthHistoryProvider, then calls startNewDraft().
+ *    (Project-II, Phase 4 - this replaces the old fire-and-forget Supabase
+ *    sync, which could insert the same assessment twice.)
  *
  * Read it with the useAssessment() hook (src/hooks/useAssessment.ts).
  */
@@ -22,9 +24,11 @@ import {
   loadAssessment,
   saveAssessment,
 } from "../services/storageService";
-import { syncAssessment } from "../services/syncService";
+import { newId } from "../lib/healthRecords";
 import { AssessmentContext } from "./assessmentContext";
 import type { AssessmentContextValue } from "./assessmentContext";
+
+const DRAFT_ID_KEY = "glucocare-draft-id";
 
 function computeHasStarted(data: AssessmentData): boolean {
   return Boolean(
@@ -40,10 +44,51 @@ function computeHasStarted(data: AssessmentData): boolean {
   );
 }
 
+function loadDraftId(): string {
+  try {
+    const existing = localStorage.getItem(DRAFT_ID_KEY);
+    if (existing) return existing;
+    const id = newId();
+    localStorage.setItem(DRAFT_ID_KEY, id);
+    return id;
+  } catch {
+    return newId(); // storage unavailable - id lives for this session only
+  }
+}
+
+function storeDraftId(id: string): void {
+  try {
+    localStorage.setItem(DRAFT_ID_KEY, id);
+  } catch {
+    // ignore
+  }
+}
+
+/** Fields carried into the next draft (profile + lifestyle). Measurements,
+ *  symptoms, warning signs and the date always start blank. */
+function carryOver(previous: AssessmentData): AssessmentData {
+  return {
+    ...emptyAssessment,
+    name: previous.name,
+    age: previous.age,
+    gender: previous.gender,
+    diabetesStatus: previous.diabetesStatus,
+    diabetesType: previous.diabetesType,
+    familyHistory: previous.familyHistory,
+    otherConditions: previous.otherConditions,
+    activityLevel: previous.activityLevel,
+    smoking: previous.smoking,
+    dietPattern: previous.dietPattern,
+    sleepHours: previous.sleepHours,
+    locality: previous.locality,
+  };
+}
+
 export function AssessmentProvider({ children }: { children: ReactNode }) {
   const [data, setData] = useState<AssessmentData>(
     () => loadAssessment() ?? emptyAssessment,
   );
+  const [draftId, setDraftId] = useState<string>(loadDraftId);
 
   useEffect(() => {
     if (computeHasStarted(data)) {
@@ -62,14 +107,16 @@ export function AssessmentProvider({ children }: { children: ReactNode }) {
   const reset = useCallback(() => {
     clearAssessment();
     setData(emptyAssessment);
+    const id = newId();
+    storeDraftId(id);
+    setDraftId(id);
   }, []);
 
-  const submit = useCallback(() => {
-    setData((current) => {
-      saveAssessment(current);
-      void syncAssessment(current); // no-op unless Supabase is configured
-      return current;
-    });
+  const startNewDraft = useCallback(() => {
+    setData((previous) => carryOver(previous));
+    const id = newId();
+    storeDraftId(id);
+    setDraftId(id);
   }, []);
 
   const value: AssessmentContextValue = {
@@ -77,7 +124,8 @@ export function AssessmentProvider({ children }: { children: ReactNode }) {
     update,
     replace,
     reset,
-    submit,
+    draftId,
+    startNewDraft,
     hasStarted: computeHasStarted(data),
   };
 

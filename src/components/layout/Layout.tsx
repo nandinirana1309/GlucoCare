@@ -1,4 +1,6 @@
+import { useEffect } from "react";
 import type { ReactNode } from "react";
+import { useLocation } from "react-router-dom";
 import Navbar from "../Navbar";
 import Footer from "./Footer";
 
@@ -8,6 +10,17 @@ import Footer from "./Footer";
  * now appear on every page - previously only the Home page had them.
  */
 export default function Layout({ children }: { children: ReactNode }) {
+  const { pathname, hash } = useLocation();
+
+  // Links such as /education#symptoms (personalised education) scroll to the
+  // section. React Router does not do this by itself.
+  useEffect(() => {
+    if (!hash) return;
+    const id = decodeURIComponent(hash.slice(1));
+    const timer = window.setTimeout(() => document.getElementById(id)?.scrollIntoView({ behavior: "smooth" }), 50);
+    return () => window.clearTimeout(timer);
+  }, [pathname, hash]);
+
   return (
     <div className="min-h-screen bg-[#071512] text-white flex flex-col">
       <Navbar />

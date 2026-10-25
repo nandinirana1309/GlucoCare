@@ -17,6 +17,7 @@ import {
 import Section from "../components/ui/Section";
 import Card from "../components/ui/Card";
 import Disclaimer from "../components/ui/Disclaimer";
+import PersonalisedForYou from "../components/education/PersonalisedForYou";
 
 export default function Nutrition() {
   return (
@@ -40,8 +41,11 @@ export default function Nutrition() {
           </p>
         </section>
 
+        {/* PERSONALISED (Phase 10) - nutrition / activity / weight topics only */}
+        <PersonalisedForYou tags={["nutrition", "activity", "bmi"]} count={2} />
+
         {/* CHOOSE / LIMIT */}
-        <section className="grid lg:grid-cols-2 gap-6 mt-16">
+        <section id="food-choices" className="scroll-mt-28 grid lg:grid-cols-2 gap-6 mt-16">
           <Card className="border-emerald-400/15">
             <div className="flex items-center gap-3">
               <div className="w-11 h-11 rounded-xl bg-emerald-400/10 flex items-center justify-center">
@@ -80,7 +84,7 @@ export default function Nutrition() {
         </section>
 
         {/* CONCEPTS */}
-        <section className="mt-16">
+        <section id="principles" className="scroll-mt-28 mt-16">
           <Section eyebrow="Everyday principles" title="Four ideas that help most" />
           <div className="grid sm:grid-cols-2 gap-5 mt-8">
             {CONCEPTS.map((concept) => (
@@ -96,7 +100,7 @@ export default function Nutrition() {
         </section>
 
         {/* SNACKS */}
-        <section className="mt-16">
+        <section id="snacks" className="scroll-mt-28 mt-16">
           <Card>
             <Section eyebrow="Practical" title="Healthy snack ideas" />
             <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 mt-6">

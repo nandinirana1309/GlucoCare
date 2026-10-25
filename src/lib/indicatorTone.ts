@@ -15,3 +15,10 @@ export function ratingToTone(rating: string): BadgeTone {
       return "neutral";
   }
 }
+
+/** Maps a concern level to a Badge tone (shared by Results, Journey, history). */
+export const LEVEL_TONE: Record<"Low" | "Moderate" | "High", BadgeTone> = {
+  Low: "positive",
+  Moderate: "caution",
+  High: "critical",
+};

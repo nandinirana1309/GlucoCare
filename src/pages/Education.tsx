@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 
 import Disclaimer from "../components/ui/Disclaimer";
+import PersonalisedForYou from "../components/education/PersonalisedForYou";
 
 const diabetesTypes = [
   {
@@ -109,10 +110,13 @@ export default function Education() {
 
         </section>
 
+        {/* PERSONALISED EDUCATION (Phase 10) - only when there is a saved assessment */}
+        <PersonalisedForYou />
+
 
         {/* WHAT IS DIABETES */}
 
-        <section className="mt-20">
+        <section id="what-is-diabetes" className="scroll-mt-28 mt-20">
 
           <div className="grid lg:grid-cols-2 gap-8 items-stretch">
 
@@ -201,7 +205,7 @@ export default function Education() {
 
         {/* TYPES */}
 
-        <section className="mt-20">
+        <section id="types" className="scroll-mt-28 mt-20">
 
           <div className="max-w-2xl">
 
@@ -274,7 +278,7 @@ export default function Education() {
 
         {/* SYMPTOMS */}
 
-        <section className="mt-20">
+        <section id="symptoms" className="scroll-mt-28 mt-20">
 
           <div className="rounded-3xl border border-white/10 bg-[#0b1d19] p-8 md:p-10">
 
@@ -338,7 +342,7 @@ export default function Education() {
 
         {/* LIFESTYLE */}
 
-        <section className="mt-20">
+        <section id="lifestyle" className="scroll-mt-28 mt-20">
 
           <div className="text-center max-w-2xl mx-auto">
 
@@ -387,7 +391,7 @@ export default function Education() {
 
         {/* WHEN TO GET HELP */}
 
-        <section className="mt-20">
+        <section id="when-to-get-help" className="scroll-mt-28 mt-20">
 
           <div className="rounded-3xl border border-red-400/10 bg-red-400/[0.03] p-8 md:p-10">
 

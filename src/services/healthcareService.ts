@@ -185,45 +185,59 @@ function overpassQuery(lat: number, lon: number, radiusM: number): string {
 out center tags 60;`;
 }
 
-/** POST the query to each endpoint until one returns valid JSON. */
+/** HTTP statuses meaning "busy, try again shortly" (Overpass asks clients to back off). */
+const BUSY = new Set([429, 502, 503, 504]);
+const RETRY_DELAY_MS = 3000;
+
+/**
+ * POST the query to each endpoint until one returns valid JSON. If every
+ * server failed and at least one said it was busy, wait briefly and try the
+ * list once more (Overpass recommends retrying with a back-off).
+ */
 async function runOverpass(query: string): Promise<OverpassElement[]> {
   let lastReason = "";
 
-  for (const endpoint of OVERPASS_ENDPOINTS) {
-    try {
-      const res = await fetchWithTimeout(
-        endpoint,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: `data=${encodeURIComponent(query)}`,
-        },
-        20000,
-      );
+  for (let round = 0; round < 2; round++) {
+    let sawBusy = false;
+    for (const endpoint of OVERPASS_ENDPOINTS) {
+      try {
+        const res = await fetchWithTimeout(
+          endpoint,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: `data=${encodeURIComponent(query)}`,
+          },
+          20000,
+        );
 
-      if (!res.ok) {
-        lastReason = `server ${res.status}`;
-        continue;
-      }
+        if (!res.ok) {
+          lastReason = `server ${res.status}`;
+          if (BUSY.has(res.status)) sawBusy = true;
+          continue;
+        }
 
-      const contentType = res.headers.get("content-type") ?? "";
-      if (!contentType.includes("json")) {
-        lastReason = "non-JSON response";
-        continue;
-      }
+        const contentType = res.headers.get("content-type") ?? "";
+        if (!contentType.includes("json")) {
+          lastReason = "non-JSON response";
+          continue;
+        }
 
-      const payload = (await res.json()) as { elements?: OverpassElement[] };
-      if (!Array.isArray(payload.elements)) {
-        lastReason = "unexpected response shape";
-        continue;
+        const payload = (await res.json()) as { elements?: OverpassElement[] };
+        if (!Array.isArray(payload.elements)) {
+          lastReason = "unexpected response shape";
+          continue;
+        }
+        return payload.elements;
+      } catch (error) {
+        lastReason =
+          error instanceof DOMException && error.name === "AbortError"
+            ? "timed out"
+            : "network error";
       }
-      return payload.elements;
-    } catch (error) {
-      lastReason =
-        error instanceof DOMException && error.name === "AbortError"
-          ? "timed out"
-          : "network error";
     }
+    if (!sawBusy || round === 1) break;
+    await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
   }
 
   throw new Error(

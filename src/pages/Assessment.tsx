@@ -1,6 +1,6 @@
-import { useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import type { ChangeEvent, ReactNode } from "react";
+import { useMemo, useRef, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import type { ReactNode } from "react";
 import {
   Activity,
   ArrowLeft,
@@ -17,12 +17,16 @@ import {
 import { useAssessment } from "../hooks/useAssessment";
 import type { AssessmentData } from "../types/assessment";
 import { DIABETES_SYMPTOMS, WARNING_SIGNS } from "../data/symptoms";
+import { GLUCOSE_CONTEXT_LABELS } from "../data/glucoseContext";
 import { validateField } from "../lib/validation";
 import type { ValidatableField } from "../lib/validation";
 import { calculateBMI, bmiCategory } from "../lib/bmi";
-import { validateReportFile } from "../services/reportService";
+import { evaluateSafety } from "../lib/safety";
+import { todayISO, validateRecordDate } from "../lib/healthRecords";
+import { useHealthHistory } from "../hooks/useHealthHistory";
+import { describeRepositoryError } from "../services/health";
 import Disclaimer from "../components/ui/Disclaimer";
-import FutureBadge from "../components/ui/FutureBadge";
+import EmergencyBanner from "../components/ui/EmergencyBanner";
 
 const STEPS = [
   { number: 1, title: "Patient Information", icon: User },
@@ -54,11 +58,15 @@ const STEP_FIELDS: Record<number, ValidatableField[]> = {
 
 export default function Assessment() {
   const navigate = useNavigate();
-  const { data, update, submit } = useAssessment();
+  const { data, update, draftId, startNewDraft, hasStarted } = useAssessment();
+  const history = useHealthHistory();
 
   const [step, setStep] = useState(1);
   const [errors, setErrors] = useState<Partial<Record<string, string>>>({});
-  const [reportError, setReportError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
+  const [saveError, setSaveError] = useState("");
+  const dateError = validateRecordDate(data.assessedOn);
 
   const setField = (field: keyof AssessmentData, value: string) => {
     update({ [field]: value } as Partial<AssessmentData>);
@@ -95,27 +103,39 @@ export default function Assessment() {
     }
   };
 
-  const finish = () => {
-    submit();
-    navigate("/results");
-  };
-
-  const onReportChange = (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    const message = validateReportFile(file);
-    if (message) {
-      setReportError(message);
-      update({ report: null });
+  /**
+   * Saves the draft to history as a NEW immutable snapshot (idempotent on
+   * draftId, so a double click cannot create two), then starts a fresh draft.
+   * On failure the draft is kept untouched and the user can retry.
+   */
+  const finish = async () => {
+    // Synchronous guard: React state updates are async, so a fast double
+    // click could otherwise run finish() twice - the second time AFTER the
+    // first save had already started a new draft (saving an extra record).
+    if (savingRef.current) return;
+    if (!hasStarted) {
+      setSaveError("Nothing has been entered yet. Add at least one answer before completing the assessment.");
       return;
     }
-    setReportError("");
-    update({ report: file.name });
-  };
-
-  const clearReport = () => {
-    setReportError("");
-    update({ report: null });
+    if (dateError) {
+      setSaveError(dateError);
+      return;
+    }
+    savingRef.current = true;
+    setSaving(true);
+    setSaveError("");
+    try {
+      const stored = await history.saveAssessment(data, draftId);
+      startNewDraft();
+      navigate(`/results/${stored.id}`);
+      // stay locked: this page is leaving, no further completes allowed
+    } catch (error) {
+      setSaveError(
+        `${describeRepositoryError(error)} Your answers are still here - you can try again.`,
+      );
+      savingRef.current = false;
+      setSaving(false);
+    }
   };
 
   return (
@@ -203,13 +223,7 @@ export default function Assessment() {
             )}
             {step === 4 && <StepLifestyle data={data} setField={setField} errors={errors} />}
             {step === 5 && (
-              <StepLocationReport
-                data={data}
-                setField={setField}
-                onReportChange={onReportChange}
-                onReportClear={clearReport}
-                reportError={reportError}
-              />
+              <StepLocationReport data={data} setField={setField} />
             )}
 
             {/* BUTTONS */}
@@ -238,13 +252,26 @@ export default function Assessment() {
               ) : (
                 <button
                   onClick={finish}
-                  className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-emerald-400 text-[#071512] font-bold hover:bg-emerald-300 transition"
+                  disabled={saving || Boolean(dateError)}
+                  className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-emerald-400 text-[#071512] font-bold hover:bg-emerald-300 transition disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  Complete Assessment
+                  {saving ? "Saving..." : "Complete Assessment"}
                   <Check size={17} />
                 </button>
               )}
             </div>
+            {saveError && (
+              <p role="alert" className="text-sm text-red-400 mt-4 text-right">
+                {saveError}
+              </p>
+            )}
+            {step === STEPS.length && !saveError && (
+              <p className="text-xs text-slate-600 mt-4 text-right">
+                {history.mode === "supabase"
+                  ? "Completing saves this assessment to your secure GlucoCare history."
+                  : "Completing saves this assessment to the history on this device."}
+              </p>
+            )}
           </div>
         </div>
 
@@ -362,6 +389,9 @@ function StepMeasurements({
   toggleInArray: (field: "symptoms" | "warningSigns", value: string) => void;
 }) {
   const bmi = calculateBMI(data.height, data.weight);
+  const warningSignTriggers = evaluateSafety(data).triggers.filter(
+    (t) => t.category === "warning-sign",
+  );
 
   return (
     <div>
@@ -393,6 +423,21 @@ function StepMeasurements({
             suffix="%"
             error={errors?.hba1c}
           />
+          {data.glucose.trim() !== "" && (
+            <div className="md:col-span-2">
+              <Select
+                label="When was this glucose reading taken? (optional)"
+                value={data.glucoseContext}
+                onChange={(v) => setField("glucoseContext", v)}
+                options={["fasting", "random", "post_meal", "unknown"]}
+                optionLabels={GLUCOSE_CONTEXT_LABELS}
+              />
+              <p className="text-xs text-slate-600 mt-2">
+                Used to keep fasting and non-fasting readings apart in your
+                history. It does not change the assessment.
+              </p>
+            </div>
+          )}
         </div>
       </div>
 
@@ -458,7 +503,7 @@ function StepMeasurements({
           Select anything you have experienced recently.
         </p>
 
-        <div className="grid sm:grid-cols-2 gap-3 mt-5">
+        <div className="grid sm:grid-cols-2 gap-3 mt-5" role="group" aria-label="Current symptoms">
           {DIABETES_SYMPTOMS.map((symptom) => (
             <CheckButton
               key={symptom}
@@ -487,7 +532,7 @@ function StepMeasurements({
           advise you to seek medical care - it does not decide what they mean.
         </p>
 
-        <div className="grid sm:grid-cols-2 gap-3 mt-5">
+        <div className="grid sm:grid-cols-2 gap-3 mt-5" role="group" aria-label="Serious warning signs">
           {WARNING_SIGNS.map((sign) => (
             <CheckButton
               key={sign}
@@ -498,6 +543,20 @@ function StepMeasurements({
             />
           ))}
         </div>
+
+        {/* Immediate feedback. Uses the same safety evaluation as Results -
+            no separate rule here. Only the warning-sign rule is shown live:
+            glucose/BP values would flash warnings while being typed
+            (e.g. "45" on the way to "450"), so those appear on Results. */}
+        {warningSignTriggers.length > 0 && (
+          <div className="mt-5">
+            <EmergencyBanner triggers={warningSignTriggers} live />
+            <p className="text-xs text-slate-500 mt-2">
+              You can still continue the assessment. This warning will also
+              appear at the top of your results.
+            </p>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -562,17 +621,7 @@ function StepLifestyle({ data, setField, errors }: StepProps) {
 /*  STEP 5 - LOCATION & REPORT                                          */
 /* ================================================================== */
 
-function StepLocationReport({
-  data,
-  setField,
-  onReportChange,
-  onReportClear,
-  reportError,
-}: StepProps & {
-  onReportChange: (event: ChangeEvent<HTMLInputElement>) => void;
-  onReportClear: () => void;
-  reportError: string;
-}) {
+function StepLocationReport({ data, setField }: StepProps) {
   return (
     <div>
       <SectionHeader
@@ -581,6 +630,20 @@ function StepLocationReport({
         title="Location & Medical Report"
         description="Your locality is used later to find nearby healthcare facilities."
       />
+
+      <div className="mt-8">
+        <Input
+          label="Date of these measurements"
+          type="date"
+          value={data.assessedOn || todayISO()}
+          onChange={(v) => setField("assessedOn", v)}
+          error={validateRecordDate(data.assessedOn)}
+        />
+        <p className="text-xs text-slate-600 mt-2">
+          Defaults to today. Choose an earlier date if you are recording older
+          readings, so your history stays in the right order.
+        </p>
+      </div>
 
       <div className="mt-8">
         <Input
@@ -594,89 +657,38 @@ function StepLocationReport({
         </p>
       </div>
 
-      <div className="mt-10">
-        <div className="flex items-center gap-3">
-          <p className="text-sm font-semibold text-white">
-            Medical report
-            <span className="text-slate-600 font-normal ml-2">Optional</span>
-          </p>
-          <FutureBadge label="Auto-reading planned" />
-        </div>
-        <p className="text-xs text-slate-500 mt-1">
-          Attach a PDF or image of a diabetes-related report. Automatic reading of
-          values is not available yet - you can type values below.
-        </p>
-
-        <label className="block mt-5 cursor-pointer">
-          <input
-            type="file"
-            accept=".pdf,.png,.jpg,.jpeg"
-            className="hidden"
-            onChange={onReportChange}
-          />
-          <div className="border-2 border-dashed border-white/10 rounded-2xl p-8 text-center hover:border-emerald-400/30 hover:bg-emerald-400/[0.02] transition">
-            <div className="w-14 h-14 mx-auto rounded-2xl bg-emerald-400/10 flex items-center justify-center">
-              {data.report ? (
-                <FileText className="text-emerald-400" size={25} />
-              ) : (
-                <Upload className="text-emerald-400" size={25} />
-              )}
-            </div>
-
-            {data.report ? (
-              <>
-                <p className="text-sm font-semibold mt-4">{data.report}</p>
-                <p className="text-xs text-emerald-400 mt-2">Report attached</p>
-              </>
-            ) : (
-              <>
-                <p className="text-sm font-semibold mt-4">Attach your medical report</p>
-                <p className="text-xs text-slate-600 mt-2">PDF, JPG or PNG (max 10 MB)</p>
-              </>
-            )}
+      {/* MEDICAL REPORT (Phase 8): reports are read and reviewed on their own
+          page, so verified report values go to history with their own date. */}
+      <div className="mt-10 rounded-2xl border border-white/10 bg-white/[0.02] p-5">
+        <div className="flex gap-3">
+          <FileText className="text-emerald-400 shrink-0" size={20} />
+          <div>
+            <p className="text-sm font-semibold text-white">
+              Medical report
+              <span className="text-slate-600 font-normal ml-2">Optional</span>
+            </p>
+            <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+              Add a lab report to your health history. GlucoCare reads the values in
+              your browser and you check each one before it is saved. You can do
+              this before or after completing this assessment.
+            </p>
+            <Link
+              to="/reports/new"
+              className="inline-flex items-center gap-1.5 mt-3 text-sm text-emerald-400 hover:text-emerald-300 transition"
+            >
+              <Upload size={15} /> Add a medical report
+            </Link>
           </div>
-        </label>
-
-        {reportError && (
-          <p className="text-xs text-red-400 mt-2">{reportError}</p>
-        )}
-
-        {data.report && (
-          <button
-            type="button"
-            onClick={onReportClear}
-            className="text-xs text-slate-500 hover:text-red-400 transition mt-3"
-          >
-            Remove attached report
-          </button>
-        )}
+        </div>
       </div>
-
-      {data.report && (
-        <div className="mt-6">
-          <p className="text-sm font-semibold text-white">
-            Values from your report (optional)
-          </p>
-          <p className="text-xs text-slate-500 mt-1">
-            If your report lists any of these, you can copy them here so they are
-            included in your assessment.
-          </p>
-          <div className="grid md:grid-cols-2 gap-5 mt-5">
-            <Input label="Blood Glucose" type="number" suffix="mg/dL" placeholder="from report"
-              value={data.glucose} onChange={(v) => setField("glucose", v)} />
-            <Input label="HbA1c" type="number" suffix="%" placeholder="from report"
-              value={data.hba1c} onChange={(v) => setField("hba1c", v)} />
-          </div>
-        </div>
-      )}
 
       <div className="mt-7 p-4 rounded-xl bg-white/[0.02] border border-white/5">
         <div className="flex gap-3">
           <FileText className="text-slate-500 shrink-0" size={18} />
           <p className="text-xs text-slate-500 leading-relaxed">
-            In the current prototype your assessment is stored in your browser. A
-            secure database backup can be enabled by the project team (Stage 7).
-            The report file itself is not uploaded anywhere yet.
+            Completing the assessment adds it to your health history. Your name
+            and locality stay on this device and are never added to your
+            history. The report file itself is not uploaded anywhere.
           </p>
         </div>
       </div>
@@ -763,11 +775,14 @@ function Select({
   value,
   onChange,
   options,
+  optionLabels,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   options: string[];
+  /** Optional display text per option value (value is shown otherwise). */
+  optionLabels?: Record<string, string>;
 }) {
   return (
     <label className="block">
@@ -780,7 +795,7 @@ function Select({
         <option value="">Select an option</option>
         {options.map((option) => (
           <option key={option} value={option}>
-            {option}
+            {optionLabels?.[option] ?? option}
           </option>
         ))}
       </select>
@@ -800,7 +815,7 @@ function RadioGroup({
   options: string[];
 }) {
   return (
-    <div>
+    <div role="group" aria-label={label}>
       <p className="text-sm text-slate-300 mb-3">{label}</p>
       <div className="flex flex-wrap gap-3">
         {options.map((option) => {
@@ -810,6 +825,7 @@ function RadioGroup({
               type="button"
               key={option}
               onClick={() => onChange(option)}
+              aria-pressed={selected}
               className={`px-5 py-3 rounded-xl border text-sm transition ${
                 selected
                   ? "border-emerald-400/40 bg-emerald-400/10 text-emerald-300"
@@ -874,6 +890,7 @@ function CheckButton({
     <button
       type="button"
       onClick={onClick}
+      aria-pressed={selected}
       className={`text-left p-4 rounded-xl border transition ${
         selected
           ? selectedClasses

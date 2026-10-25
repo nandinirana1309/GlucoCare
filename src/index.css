@@ -8,3 +8,42 @@ body {
   margin: 0;
   min-width: 320px;
 }
+/* Doctor summary (Phase 11): print only the summary sheet, in black on white. */
+@media print {
+  nav,
+  footer,
+  .no-print {
+    display: none !important;
+  }
+  html,
+  body,
+  body > div,
+  main {
+    background: #fff !important;
+    color: #000 !important;
+  }
+  main {
+    padding-top: 0 !important;
+  }
+  .print-sheet {
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+  .print-sheet footer {
+    display: block !important;
+  }
+}
+
+/* Accessibility: a clearly visible keyboard focus ring on interactive
+   elements (mouse clicks do not show it - :focus-visible). */
+a:focus-visible,
+button:focus-visible,
+select:focus-visible,
+summary:focus-visible,
+[role="button"]:focus-visible,
+input[type="checkbox"]:focus-visible {
+  outline: 2px solid #34d399;
+  outline-offset: 2px;
+}

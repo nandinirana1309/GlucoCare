@@ -1,21 +1,12 @@
 /**
- * GlucoCare - medical report service (Stage 6)
+ * GlucoCare - medical report file checks
  * -------------------------------------------------------------
- * Automatic reading of uploaded reports (OCR / value extraction) is a
- * PROPOSED FEATURE and is intentionally NOT faked here.
- *
- * What works today:
- *   - validateReportFile(): checks type and size before accepting a file
- *   - extractReport(): always returns status "not-implemented" with an honest
- *     message. The Assessment page then offers OPTIONAL manual entry, where the
- *     user copies values from their own report.
- *
- * When automatic extraction is built, it will run in a Supabase Edge Function
- * (server-side, so uploaded documents are not processed in the browser) and
- * this function's body is the only thing that changes.
+ * First line of validation for an uploaded report (declared type + size).
+ * The content is then checked by magic bytes and read entirely in the
+ * browser by services/reportExtractionService.ts (Project-II, Phase 8),
+ * which replaced the earlier "not implemented" stub.
  */
 
-import type { ReportExtractionResult } from "../types/report";
 import {
   ACCEPTED_REPORT_TYPES,
   MAX_REPORT_SIZE_MB,
@@ -26,16 +17,11 @@ export function validateReportFile(file: File): string {
   if (!typeOk) {
     return "Unsupported file type. Please upload a PDF, PNG or JPG file.";
   }
+  if (file.size === 0) {
+    return "This file is empty.";
+  }
   if (file.size > MAX_REPORT_SIZE_MB * 1024 * 1024) {
     return `File is too large. Maximum size is ${MAX_REPORT_SIZE_MB} MB.`;
   }
   return "";
-}
-
-export async function extractReport(_file: File): Promise<ReportExtractionResult> {
-  return {
-    status: "not-implemented",
-    message:
-      "Automatic reading of medical reports is a planned feature and is not available yet. Your file has been attached to this assessment. You can optionally type any values from it below.",
-  };
 }

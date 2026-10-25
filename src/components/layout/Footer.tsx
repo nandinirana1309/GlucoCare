@@ -1,17 +1,25 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import { Activity } from "lucide-react";
 import { useAssessment } from "../../hooks/useAssessment";
+import { useHealthHistory } from "../../hooks/useHealthHistory";
+import { useClearAllData } from "../../hooks/useClearAllData";
+import { describeRepositoryError } from "../../services/health";
 
 export default function Footer() {
-  const { hasStarted, reset } = useAssessment();
+  const { hasStarted } = useAssessment();
+  const { history } = useHealthHistory();
+  const clearAll = useClearAllData();
+  const [error, setError] = useState("");
 
-  const handleClear = () => {
-    if (
-      window.confirm(
-        "This deletes the assessment saved in this browser. Continue?",
-      )
-    ) {
-      reset();
+  const hasHistory = history.assessments.length > 0 || history.reports.length > 0;
+
+  const handleClear = async () => {
+    try {
+      await clearAll();
+      setError("");
+    } catch (e) {
+      setError(describeRepositoryError(e));
     }
   };
 
@@ -38,14 +46,15 @@ export default function Footer() {
               Educational project &middot; Not a substitute for professional
               medical advice or diagnosis
             </p>
-            {hasStarted && (
+            {(hasStarted || hasHistory) && (
               <button
                 onClick={handleClear}
                 className="text-xs text-slate-600 hover:text-red-400 transition mt-2"
               >
-                Clear my data from this browser
+                Delete all my GlucoCare data
               </button>
             )}
+            {error && <p role="alert" className="text-xs text-red-400 mt-1">{error}</p>}
           </div>
 
         </div>

@@ -1,9 +1,10 @@
 import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import type { ComponentType, ReactNode } from "react";
 import {
   Activity,
   ArrowRight,
+  CalendarDays,
   CheckCircle2,
   FileText,
   FlaskConical,
@@ -12,23 +13,36 @@ import {
   Salad,
   ShieldAlert,
   ShieldCheck,
-  Sparkles,
   Stethoscope,
   TriangleAlert,
 } from "lucide-react";
 
 import { useAssessment } from "../hooks/useAssessment";
+import { useHealthHistory } from "../hooks/useHealthHistory";
+import { useClearAllData } from "../hooks/useClearAllData";
 import { runAssessment } from "../lib/assessmentEngine";
+import { formatDate } from "../lib/format";
+import type { AssessmentData } from "../types/assessment";
+import type { StoredAssessment } from "../types/health";
+import { describeRepositoryError } from "../services/health";
+import type { RepositoryMode } from "../services/health";
+import LegacyMigrationNotice from "../components/history/LegacyMigrationNotice";
+import AssessmentHistoryList from "../components/history/AssessmentHistoryList";
+import WhatChanged from "../components/history/WhatChanged";
+import AiExplainPanel from "../components/ai/AiExplainPanel";
+import RecommendedReading from "../components/education/RecommendedReading";
+import { analyseAll } from "../lib/trends";
+import { compareAssessments } from "../lib/compare";
+import { sanitizeAssessmentInput } from "../lib/healthRecords";
+import type { Measurement } from "../types/health";
 import type { AssessmentResult, ConcernLevel, IndicatorResult } from "../types/results";
-import type { AiExplanation } from "../types/ai";
-import { explainResults, isAiConfigured } from "../services/aiService";
 import Card from "../components/ui/Card";
 import Badge from "../components/ui/Badge";
 import { ratingToTone } from "../lib/indicatorTone";
 import Section from "../components/ui/Section";
 import Disclaimer from "../components/ui/Disclaimer";
 import EmergencyBanner from "../components/ui/EmergencyBanner";
-import FutureBadge from "../components/ui/FutureBadge";
+import FactorBreakdown from "../components/results/FactorBreakdown";
 
 const REC_ICONS: Record<string, ComponentType<{ size?: number; className?: string }>> = {
   Stethoscope,
@@ -46,36 +60,105 @@ const CONCERN_TONE: Record<ConcernLevel, { badge: "positive" | "caution" | "crit
   High: { badge: "critical", ring: "border-red-400/20 bg-red-400/5", icon: ShieldAlert },
 };
 
+/**
+ * Which assessment the page shows (Project-II, Phase 4):
+ *   /results/:id -> that saved assessment (frozen result, never recalculated)
+ *   /results     -> the latest saved assessment; if nothing is saved yet but
+ *                   a draft exists (e.g. from before history existed), the
+ *                   draft is shown live and marked "not saved".
+ */
 export default function Results() {
-  const { data, hasStarted, reset } = useAssessment();
+  const { id } = useParams();
+  const navigate = useNavigate();
+  const { data: draft, hasStarted } = useAssessment();
+  const history = useHealthHistory();
+  const clearAllData = useClearAllData();
+  const [actionError, setActionError] = useState("");
 
-  const result = useMemo<AssessmentResult>(() => runAssessment(data), [data]);
+  const stored = id ? history.getAssessment(id) : history.latest;
 
-  const [ai, setAi] = useState<AiExplanation | null>(null);
-  const [aiLoading, setAiLoading] = useState(false);
+  const clearAll = async () => {
+    try {
+      if (await clearAllData()) {
+        setActionError("");
+        navigate("/results");
+      }
+    } catch (error) {
+      setActionError(describeRepositoryError(error));
+    }
+  };
 
-  if (!hasStarted) {
-    return <NoAssessment />;
+  const deleteOne = async (assessmentId: string) => {
+    if (!confirm("Delete this saved assessment from your history? This cannot be undone.")) return;
+    try {
+      await history.deleteAssessment(assessmentId);
+      setActionError("");
+      navigate("/results");
+    } catch (error) {
+      setActionError(describeRepositoryError(error));
+    }
+  };
+
+  if (history.status === "loading") return <LoadingState />;
+
+  if (!stored && history.status === "error") {
+    return <HistoryErrorState message={history.error} onRetry={() => void history.refresh()} />;
   }
 
-  const requestAi = async () => {
-    setAiLoading(true);
-    const explanation = await explainResults({
-      result,
-      context: {
-        age: data.age,
-        gender: data.gender,
-        diabetesStatus: data.diabetesStatus,
-        familyHistory: data.familyHistory,
-        activityLevel: data.activityLevel,
-        smoking: data.smoking,
-        dietPattern: data.dietPattern,
-        symptoms: data.symptoms,
-      },
-    });
-    setAi(explanation);
-    setAiLoading(false);
-  };
+  if (id && !stored) return <AssessmentNotFound />;
+
+  if (!stored && !hasStarted) return <NoAssessment />;
+
+  // Name and locality live only on this device - shown from the draft.
+  const data: AssessmentData = stored
+    ? { ...stored.input, name: draft.name, locality: draft.locality, report: null }
+    : draft;
+
+  return (
+    <ResultsView
+      key={stored?.id ?? "draft"}
+      data={data}
+      stored={stored ?? null}
+      history={history.history.assessments}
+      measurements={history.history.measurements}
+      mode={history.mode}
+      actionError={actionError}
+      onClearAll={clearAll}
+      onDelete={deleteOne}
+    />
+  );
+}
+
+function ResultsView({
+  data,
+  stored,
+  history,
+  mode,
+  measurements,
+  actionError,
+  onClearAll,
+  onDelete,
+}: {
+  data: AssessmentData;
+  stored: StoredAssessment | null;
+  history: StoredAssessment[];
+  measurements: Measurement[];
+  mode: RepositoryMode;
+  actionError: string;
+  onClearAll: () => void;
+  onDelete: (id: string) => void;
+}) {
+  // A saved assessment shows its FROZEN result; an unsaved draft is computed live.
+  const result = useMemo<AssessmentResult>(
+    () => (stored ? stored.result : runAssessment(data)),
+    [stored, data],
+  );
+
+  // Evidence for the AI: the change since the previous saved assessment and
+  // measurements recorded up to this assessment's date (deterministic).
+  const previous = stored ? history[history.findIndex((a) => a.id === stored.id) - 1] : undefined;
+  const previousComparison = stored && previous ? compareAssessments(previous, stored) : null;
+  const measurementsUpTo = stored ? measurements.filter((m) => m.measuredOn <= stored.assessedOn) : [];
 
   const tone = CONCERN_TONE[result.concernLevel];
   const ConcernIcon = tone.icon;
@@ -95,14 +178,33 @@ export default function Results() {
             and discuss anything that concerns you with a qualified healthcare
             professional.
           </p>
+          <div className="flex flex-wrap items-center gap-3 mt-5">
+            {stored ? (
+              <>
+                <Badge tone="positive">
+                  <CalendarDays size={13} /> Assessment of {formatDate(stored.assessedOn)}
+                </Badge>
+                <Badge tone="neutral">
+                  {mode === "supabase" ? "Saved to your history" : "Saved on this device"}
+                </Badge>
+                {stored.result.legacy && <Badge tone="info">Earlier GlucoCare version</Badge>}
+              </>
+            ) : (
+              <Badge tone="caution">Not saved to your history yet</Badge>
+            )}
+          </div>
         </div>
 
-        {/* EMERGENCY BANNER */}
-        {result.redFlags.length > 0 && (
+        {/* SAFETY WARNING - always first. Driven only by result.safety (the
+            single safety evaluation in src/lib/safety.ts). */}
+        {result.safety.isUrgent && (
           <div className="mt-8">
-            <EmergencyBanner reasons={result.redFlags.map((f) => f.reason)} />
+            <EmergencyBanner triggers={result.safety.triggers} />
           </div>
         )}
+
+        {/* PRE-PROJECT-II RECORD, offered for migration (below safety) */}
+        <LegacyMigrationNotice className="mt-8" />
 
         {/* CONCERN CARD */}
         <section className="mt-10">
@@ -135,6 +237,9 @@ export default function Results() {
             information you entered. It is not a medical diagnosis.
           </p>
         </section>
+
+        {/* WHY AM I SEEING THIS RESULT? (explainable score) */}
+        <FactorBreakdown result={result} />
 
         {/* INDICATORS */}
         <section className="mt-12">
@@ -277,46 +382,16 @@ export default function Results() {
           </div>
         </section>
 
-        {/* AI EXPLANATION (Stage 8) */}
-        <section className="mt-12">
-          <div className="flex items-center gap-3">
-            <Section eyebrow="Optional" title="AI-assisted explanation" />
-            {!isAiConfigured && <FutureBadge label="Not connected yet" />}
-          </div>
+        {/* PERSONALISED EDUCATION (Phase 10) */}
+        <RecommendedReading result={result} trends={analyseAll(measurementsUpTo)} />
 
-          <Card className="mt-6">
-            {!isAiConfigured ? (
-              <p className="text-sm text-slate-400 leading-relaxed">
-                An AI assistant can explain these results in simpler language,
-                define medical terms and suggest what kind of professional to
-                consult. It is switched off here because no AI service is
-                configured (see <span className="text-slate-300">docs/AI-SETUP.md</span>).
-                When enabled it never diagnoses or recommends medication.
-              </p>
-            ) : ai === null ? (
-              <div>
-                <p className="text-sm text-slate-400 leading-relaxed">
-                  Generate a plain-language explanation of the results above.
-                  This does not diagnose or prescribe.
-                </p>
-                <button
-                  onClick={requestAi}
-                  disabled={aiLoading}
-                  className="mt-4 inline-flex items-center gap-2 px-5 py-3 rounded-xl bg-emerald-400 text-[#071512] font-bold hover:bg-emerald-300 transition disabled:opacity-50"
-                >
-                  <Sparkles size={16} />
-                  {aiLoading ? "Generating..." : "Explain my results"}
-                </button>
-              </div>
-            ) : ai.status === "error" ? (
-              <p className="text-sm text-red-400">
-                The explanation could not be generated ({ai.errorMessage}). Please try again later.
-              </p>
-            ) : (
-              <AiResult ai={ai} />
-            )}
-          </Card>
-        </section>
+        {/* AI EXPLANATION (Phase 9: evidence-based, guarded, blocked when urgent) */}
+        <AiExplainPanel
+          input={stored ? stored.input : sanitizeAssessmentInput(data)}
+          result={result}
+          comparison={previousComparison}
+          measurements={measurementsUpTo}
+        />
 
         {/* HEALTHCARE CTA */}
         <section className="mt-12">
@@ -355,20 +430,101 @@ export default function Results() {
           </div>
         </section>
 
+        {/* WHAT CHANGED since the assessment before this one (Phase 7) */}
+        {stored && history.length > 1 && (
+          <WhatChanged key={stored.id} assessments={history} currentId={stored.id} />
+        )}
+
+        {/* SAVED ASSESSMENTS */}
+        {history.length > 0 && (
+          <section className="mt-12" aria-label="Your saved assessments">
+            <Section eyebrow="Health history" title="Your saved assessments" />
+            <AssessmentHistoryList
+              assessments={history}
+              currentId={stored?.id}
+              className="mt-6"
+            />
+            <Link
+              to="/journey"
+              className="inline-flex items-center gap-1.5 mt-4 text-sm text-emerald-400 hover:text-emerald-300 transition"
+            >
+              Open my health journey
+              <ArrowRight size={15} />
+            </Link>
+          </section>
+        )}
+
         {/* FOOTER ACTIONS */}
+        {actionError && (
+          <p role="alert" className="mt-8 text-sm text-red-400">{actionError}</p>
+        )}
         <div className="mt-12 flex flex-col sm:flex-row items-center justify-between gap-4">
           <Disclaimer className="mx-0 text-left" />
-          <button
-            onClick={() => {
-              if (confirm("This will delete the assessment saved in this browser. Continue?")) {
-                reset();
-              }
-            }}
-            className="text-xs text-slate-500 hover:text-red-400 transition shrink-0"
-          >
-            Clear my data
-          </button>
+          <div className="flex items-center gap-5 shrink-0">
+            {stored && (
+              <button
+                onClick={() => onDelete(stored.id)}
+                className="text-xs text-slate-500 hover:text-red-400 transition"
+              >
+                Delete this assessment
+              </button>
+            )}
+            <button
+              onClick={onClearAll}
+              className="text-xs text-slate-500 hover:text-red-400 transition"
+            >
+              Clear my data
+            </button>
+          </div>
         </div>
+      </div>
+    </main>
+  );
+}
+
+function LoadingState() {
+  return (
+    <main className="min-h-screen pt-32 px-6" aria-busy="true">
+      <div className="max-w-xl mx-auto text-center py-24">
+        <div className="w-10 h-10 mx-auto rounded-full border-2 border-emerald-400/30 border-t-emerald-400 animate-spin" />
+        <p className="text-slate-500 mt-6" role="status">Loading your health history...</p>
+      </div>
+    </main>
+  );
+}
+
+function HistoryErrorState({ message, onRetry }: { message: string | null; onRetry: () => void }) {
+  return (
+    <main className="min-h-screen pt-32 px-6">
+      <div className="max-w-xl mx-auto text-center py-24" role="alert">
+        <h1 className="text-3xl font-bold">Your history could not be loaded</h1>
+        <p className="text-slate-400 mt-4">{message}</p>
+        <button
+          onClick={onRetry}
+          className="mt-8 px-6 py-3 rounded-xl bg-emerald-400 text-[#071512] font-bold hover:bg-emerald-300 transition"
+        >
+          Try again
+        </button>
+      </div>
+    </main>
+  );
+}
+
+function AssessmentNotFound() {
+  return (
+    <main className="min-h-screen pt-32 px-6">
+      <div className="max-w-xl mx-auto text-center py-24">
+        <h1 className="text-3xl font-bold">Assessment not found</h1>
+        <p className="text-slate-500 mt-4">
+          It may have been deleted, or it belongs to a different device or session.
+        </p>
+        <Link
+          to="/results"
+          className="inline-flex items-center gap-2 mt-8 px-6 py-3 rounded-xl bg-emerald-400 text-[#071512] font-bold"
+        >
+          View latest results
+          <ArrowRight size={17} />
+        </Link>
       </div>
     </main>
   );
@@ -392,51 +548,6 @@ function IndicatorCard({ indicator }: { indicator: IndicatorResult }) {
       <div className="mt-3">
         <Badge tone={ratingToTone(indicator.rating)}>{indicator.statusText}</Badge>
       </div>
-    </div>
-  );
-}
-
-function AiResult({ ai }: { ai: AiExplanation }) {
-  return (
-    <div className="space-y-5">
-      <p className="text-sm text-slate-300 leading-relaxed">{ai.summary}</p>
-
-      {ai.termNotes.length > 0 && (
-        <div>
-          <p className="text-xs uppercase tracking-widest text-emerald-400 font-semibold">Terms explained</p>
-          <div className="mt-2 space-y-2">
-            {ai.termNotes.map((note) => (
-              <p key={note.term} className="text-sm text-slate-400">
-                <span className="text-white font-medium">{note.term}:</span> {note.meaning}
-              </p>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {ai.suggestions.length > 0 && (
-        <div>
-          <p className="text-xs uppercase tracking-widest text-emerald-400 font-semibold">Suggestions</p>
-          <ul className="mt-2 space-y-1">
-            {ai.suggestions.map((s) => (
-              <li key={s} className="text-sm text-slate-400 flex gap-2">
-                <CheckCircle2 size={15} className="text-emerald-400 shrink-0 mt-0.5" />
-                {s}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {ai.whoToSee && (
-        <p className="text-sm text-slate-400">
-          <span className="text-white font-medium">Who to consider seeing:</span> {ai.whoToSee}
-        </p>
-      )}
-
-      <p className="text-xs text-slate-600 leading-relaxed border-t border-white/10 pt-4">
-        {ai.disclaimer}
-      </p>
     </div>
   );
 }

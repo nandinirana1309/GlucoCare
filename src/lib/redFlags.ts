@@ -62,6 +62,9 @@ const RULES: Rule[] = [
   },
 ];
 
+/** Ids of every rule above, in evaluation order (used by src/lib/safety.ts). */
+export const RED_FLAG_RULE_IDS: readonly string[] = RULES.map((rule) => rule.id);
+
 export function checkRedFlags(data: AssessmentData): RedFlag[] {
   const numbers: ParsedNumbers = {
     glucose: toNumber(data.glucose),

@@ -31,6 +31,9 @@ export type DietPattern =
   | "Irregular / skipped meals"
   | "Not sure";
 
+/** When a glucose reading was taken. "" = not answered (treated as unknown). */
+export type GlucoseContext = "fasting" | "random" | "post_meal" | "unknown";
+
 export interface AssessmentData {
   /* Step 1 - Patient information */
   name: string;
@@ -45,6 +48,8 @@ export interface AssessmentData {
 
   /* Step 3 - Health measurements */
   glucose: string;
+  /** Added in Project-II. Display/trend context only - never changes scoring. */
+  glucoseContext: GlucoseContext | "";
   hba1c: string;
   height: string;
   weight: string;
@@ -63,7 +68,13 @@ export interface AssessmentData {
 
   /* Step 5 - Location & report */
   locality: string;
+  /** Legacy (Stage 6) attached-file name. Never copied into health history. */
   report: string | null;
+  /**
+   * Added in Project-II: the date these values refer to (yyyy-mm-dd).
+   * "" = today. Lets users record older readings in their history.
+   */
+  assessedOn: string;
 }
 
 /** A blank assessment - the starting point for a new user. */
@@ -76,6 +87,7 @@ export const emptyAssessment: AssessmentData = {
   familyHistory: "",
   otherConditions: "",
   glucose: "",
+  glucoseContext: "",
   hba1c: "",
   height: "",
   weight: "",
@@ -90,6 +102,7 @@ export const emptyAssessment: AssessmentData = {
   sleepHours: "",
   locality: "",
   report: null,
+  assessedOn: "",
 };
 
 /**

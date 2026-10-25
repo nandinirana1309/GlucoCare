@@ -27,3 +27,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# End-to-end test artefacts (generated)
+e2e/.fixtures

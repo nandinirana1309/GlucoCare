@@ -3,22 +3,35 @@ import { AlertTriangle } from "lucide-react";
 type EmergencyBannerProps = {
   /** Plain-language reasons the banner appeared (never a diagnosis). */
   reasons?: string[];
+  /**
+   * Reasons WITH the input that caused them (from result.safety.triggers).
+   * When given, shown instead of `reasons`.
+   */
+  triggers?: { reason: string; evidence: string }[];
+  /** Announce to screen readers as soon as it appears (e.g. on the form). */
+  live?: boolean;
   className?: string;
 };
 
 /**
  * Red "please seek medical care" banner.
- * Created in Stage 1, shown by the Results page in Stage 3 when the red-flag
- * rules in src/lib/redFlags.ts match. It never names a condition - it only
- * tells the user to contact a professional.
+ * Created in Stage 1. Shown by the Results page when the assessment's safety
+ * status (src/lib/safety.ts) is urgent, and on the assessment form as soon as
+ * a warning sign is ticked. It never names a condition - it only tells the
+ * user to contact a professional.
  */
 export default function EmergencyBanner({
   reasons = [],
+  triggers,
+  live = false,
   className = "",
 }: EmergencyBannerProps) {
+  const items = triggers ?? reasons.map((reason) => ({ reason, evidence: "" }));
+
   return (
     <div
       className={`rounded-2xl border border-red-400/30 bg-red-400/10 p-6 ${className}`}
+      role={live ? "alert" : undefined}
     >
       <div className="flex gap-4">
         <div className="w-11 h-11 shrink-0 rounded-xl bg-red-400/15 flex items-center justify-center">
@@ -40,12 +53,17 @@ export default function EmergencyBanner({
             provide a diagnosis.
           </p>
 
-          {reasons.length > 0 && (
-            <ul className="mt-3 space-y-1">
-              {reasons.map((reason) => (
-                <li key={reason} className="text-sm text-slate-400 flex gap-2">
+          {items.length > 0 && (
+            <ul className="mt-3 space-y-1.5">
+              {items.map((item) => (
+                <li key={item.reason} className="text-sm text-slate-400 flex gap-2">
                   <span className="text-red-400">&bull;</span>
-                  {reason}
+                  <span>
+                    {item.reason}
+                    {item.evidence && (
+                      <span className="block text-xs text-slate-500 mt-0.5">{item.evidence}</span>
+                    )}
+                  </span>
                 </li>
               ))}
             </ul>

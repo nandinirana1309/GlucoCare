@@ -13,9 +13,13 @@
  *     If it is not set, this returns status "not-configured" and the UI shows
  *     an honest "not connected" note.
  *   - Only NON-IDENTIFYING fields are sent (no name, no locality, no report).
+ *   - Never called when result.safety.aiAllowed is false (safety gate).
  */
 
-import type { AiExplanation, AiExplanationRequest } from "../types/ai";
+import type { AiEvidence, AiExplanation, AiExplanationRequest, AiExplanationV2 } from "../types/ai";
+import type { SafetyStatus } from "../types/safety";
+import { validateAiResponse } from "../lib/aiGuard";
+import { supabase } from "./supabaseClient";
 
 const FUNCTION_URL = import.meta.env.VITE_AI_FUNCTION_URL as string | undefined;
 
@@ -27,6 +31,21 @@ const BASE_DISCLAIMER =
 export async function explainResults(
   request: AiExplanationRequest,
 ): Promise<AiExplanation> {
+  // SAFETY GATE - checked before anything else. When the assessment's safety
+  // status is urgent, nothing is sent to the AI and no generated text can
+  // appear next to (or contradict) the emergency warning. The Results page
+  // also hides the button; this is the second line of defence.
+  if (!request.result.safety.aiAllowed) {
+    return {
+      status: "blocked-by-safety",
+      summary: "",
+      termNotes: [],
+      suggestions: [],
+      whoToSee: "",
+      disclaimer: BASE_DISCLAIMER,
+    };
+  }
+
   if (!FUNCTION_URL) {
     return {
       status: "not-configured",
@@ -93,4 +112,86 @@ function errorResult(message: string): AiExplanation {
     disclaimer: BASE_DISCLAIMER,
     errorMessage: message,
   };
+}
+
+/* ================================================================== */
+/*  AI v2 - evidence-based explanation (Project-II, Phase 9)           */
+/* ================================================================== */
+/*
+ * The AI receives ONLY structured evidence (lib/aiEvidence.ts) and its reply
+ * is ALWAYS validated by lib/aiGuard.ts before anything is shown. The
+ * deterministic result (score, level, factors, safety) is never changed by
+ * the AI - it is only explained.
+ */
+
+const AI_TIMEOUT_MS = 30_000;
+
+async function authHeader(): Promise<Record<string, string>> {
+  // When deployed as a Supabase Edge Function, the function verifies this
+  // (anonymous or signed-in) user token. The local proxy ignores it.
+  if (!supabase) return {};
+  try {
+    const { data } = await supabase.auth.getSession();
+    const token = data.session?.access_token;
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  } catch {
+    return {};
+  }
+}
+
+const v2 = (status: AiExplanationV2["status"], extra: Partial<AiExplanationV2> = {}): AiExplanationV2 => ({
+  status,
+  content: null,
+  issues: [],
+  disclaimer: BASE_DISCLAIMER,
+  ...extra,
+});
+
+export async function explainWithEvidence(
+  evidence: AiEvidence,
+  safety: SafetyStatus,
+): Promise<AiExplanationV2> {
+  // 1. SAFETY GATE - deterministic, before any network call.
+  if (!safety.aiAllowed || evidence.safety.urgent) return v2("blocked-by-safety");
+  // 2. Not configured -> honest "not connected" state.
+  if (!FUNCTION_URL) return v2("not-configured");
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+  try {
+    const response = await fetch(FUNCTION_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(await authHeader()) },
+      body: JSON.stringify({ task: evidence.task, promptVersion: evidence.promptVersion, evidence }),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      let detail = `Server responded with ${response.status}`;
+      try {
+        const body = (await response.json()) as { error?: string };
+        if (body.error) detail = body.error;
+      } catch {
+        // keep the generic message
+      }
+      return v2("error", { errorMessage: detail });
+    }
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch {
+      return v2("blocked", { issues: [{ field: "*", rule: "invalid-shape", text: "not JSON" }] });
+    }
+    // 3. GUARD - every reply is validated against the evidence.
+    const guarded = validateAiResponse(payload, evidence);
+    return v2(guarded.status, { content: guarded.content, issues: guarded.issues });
+  } catch (error) {
+    const aborted = error instanceof DOMException && error.name === "AbortError";
+    return v2("error", {
+      errorMessage: aborted
+        ? "The AI service took too long to respond."
+        : "Could not reach the AI service. If you are running it locally, make sure 'npm run server' is running.",
+    });
+  } finally {
+    clearTimeout(timer);
+  }
 }

@@ -9,8 +9,12 @@
  *     criteria - see src/data/referenceRanges.ts)
  *   - an overall "concern" indicator (Low / Moderate / High) from a simple
  *     transparent point score
+ *   - an EXPLAINABLE breakdown of that score: one ScoreFactor per scoring
+ *     rule, saying which input was used, which band matched, the points and
+ *     why (engine 1.1.0). concernScore is always the sum of factor points.
  *   - the risk factors that contributed
- *   - conservative red-flag checks (src/lib/redFlags.ts)
+ *   - a safety status (src/lib/safety.ts, rules in src/lib/redFlags.ts),
+ *     evaluated FIRST and independently of the score; urgent forces "High"
  *   - general educational recommendations
  *
  * The UI always labels the output as educational and points the user to a
@@ -21,9 +25,15 @@ import type { AssessmentData } from "../types/assessment";
 import type {
   AssessmentResult,
   ConcernLevel,
+  FactorCategory,
+  FactorId,
+  FactorSeverity,
   IndicatorResult,
+  LevelBasis,
   Recommendation,
+  RedFlag,
   RiskFactor,
+  ScoreFactor,
 } from "../types/results";
 import {
   GLUCOSE_REFERENCE,
@@ -33,9 +43,15 @@ import {
   classify,
 } from "../data/referenceRanges";
 import { calculateBMI } from "./bmi";
-import { checkRedFlags } from "./redFlags";
+import { evaluateSafety } from "./safety";
+import type { SafetyStatus } from "../types/safety";
 
-export const ENGINE_VERSION = "1.0.0";
+/**
+ * 1.0.0 - original rules.
+ * 1.1.0 - adds the explainable factor breakdown. Scores and levels are
+ *         IDENTICAL to 1.0.0 (locked by src/lib/scoreLock.test.ts).
+ */
+export const ENGINE_VERSION = "1.1.0";
 
 function toNumber(value: string): number | null {
   if (value.trim() === "") return null;
@@ -158,61 +174,448 @@ function notProvided(
 }
 
 /* ------------------------------------------------------------------ */
-/*  Concern score                                                      */
+/*  Concern score - explainable rules                                  */
 /* ------------------------------------------------------------------ */
+/*
+ * Each scoring rule below reads specific input fields, finds which band the
+ * value falls in and returns a ScoreFactor. The concern score is simply the
+ * sum of the factors' points, so every point can be traced to one input.
+ *
+ * The bands and point values are exactly those of engine 1.0.0 - they were
+ * not changed in this refactor (see scoreLock.test.ts). `severity` is only a
+ * display grouping of each band, not a clinical grade.
+ */
 
-function scoreConcern(
-  data: AssessmentData,
-  glucose: number | null,
-  hba1c: number | null,
-  systolic: number | null,
-  diastolic: number | null,
-  bmi: number | null,
-): number {
-  let score = 0;
-
-  if (glucose !== null) {
-    if (glucose >= 200) score += 3;
-    else if (glucose >= 126) score += 2;
-    else if (glucose >= 100) score += 1;
-  }
-
-  if (hba1c !== null) {
-    if (hba1c >= 6.5) score += 3;
-    else if (hba1c >= 5.7) score += 1;
-  }
-
-  if (systolic !== null && diastolic !== null) {
-    if (systolic >= 140 || diastolic >= 90) score += 2;
-    else if (systolic >= 130 || diastolic >= 80) score += 1;
-  }
-
-  if (bmi !== null) {
-    if (bmi >= 30) score += 2;
-    else if (bmi >= 25) score += 1;
-  }
-
-  const symptomCount = data.symptoms.length;
-  if (symptomCount >= 4) score += 2;
-  else if (symptomCount >= 2) score += 1;
-
-  if (data.familyHistory === "Yes") score += 1;
-  if (data.diabetesStatus === "Yes" || data.diabetesStatus === "Not sure") score += 1;
-
-  const age = toNumber(data.age);
-  if (age !== null && age >= 45) score += 1;
-
-  if (data.activityLevel === "Sedentary") score += 1;
-  if (data.smoking === "Yes") score += 1;
-  if (data.dietPattern === "Often high in sugary food or drinks") score += 1;
-
-  return score;
+/** Values parsed once and shared by every rule. */
+interface ParsedInputs {
+  glucose: number | null;
+  hba1c: number | null;
+  systolic: number | null;
+  diastolic: number | null;
+  bmi: number | null;
+  age: number | null;
 }
 
-function concernFromScore(score: number, hasRedFlags: boolean): ConcernLevel {
-  if (hasRedFlags || score >= 6) return "High";
-  if (score >= 3) return "Moderate";
+/** The fixed description of a factor (what it is and what it reads). */
+interface FactorMeta {
+  id: FactorId;
+  label: string;
+  category: FactorCategory;
+  maxPoints: number;
+  sourceFields: (keyof AssessmentData)[];
+  citation?: string;
+}
+
+/** The band that matched for this user's value. */
+interface Band {
+  ruleId: string;
+  points: number;
+  severity: FactorSeverity;
+  reason: string;
+}
+
+type ScoringRule = (data: AssessmentData, n: ParsedInputs) => ScoreFactor;
+
+function provided(meta: FactorMeta, displayValue: string, band: Band): ScoreFactor {
+  return {
+    ...meta,
+    provided: true,
+    displayValue,
+    points: band.points,
+    severity: band.severity,
+    ruleId: band.ruleId,
+    reason: band.reason,
+    provenance: "assessment-form",
+  };
+}
+
+function notGiven(meta: FactorMeta, reason: string): ScoreFactor {
+  return {
+    ...meta,
+    provided: false,
+    displayValue: null,
+    points: 0,
+    severity: "none",
+    ruleId: `${meta.id}.not-provided`,
+    reason,
+  };
+}
+
+/** Thresholds that turn the score into a level (unchanged from 1.0.0). */
+export const LEVEL_THRESHOLDS = { moderate: 3, high: 6 } as const;
+
+const SCORING_RULES: ScoringRule[] = [
+  /* Blood glucose: >=200 -> 3, 126-199 -> 2, 100-125 -> 1, otherwise 0 */
+  (_d, n) => {
+    const meta: FactorMeta = {
+      id: "glucose",
+      label: "Blood glucose",
+      category: "measurement",
+      maxPoints: 3,
+      sourceFields: ["glucose"],
+      citation: GLUCOSE_REFERENCE.citation,
+    };
+    if (n.glucose === null) return notGiven(meta, "No blood glucose value was entered.");
+    const g = n.glucose;
+    const value = `${g} mg/dL`;
+    if (g >= 200)
+      return provided(meta, value, {
+        ruleId: "glucose.gte-200",
+        points: 3,
+        severity: "high",
+        reason: "200 mg/dL or above - the highest glucose scoring band.",
+      });
+    if (g >= 126)
+      return provided(meta, value, {
+        ruleId: "glucose.126-199",
+        points: 2,
+        severity: "moderate",
+        reason: "126 mg/dL or above - elevated compared with the fasting reference range.",
+      });
+    if (g >= 100)
+      return provided(meta, value, {
+        ruleId: "glucose.100-125",
+        points: 1,
+        severity: "mild",
+        reason: "100-125 mg/dL - borderline (prediabetes fasting range).",
+      });
+    return provided(meta, value, {
+      ruleId: "glucose.below-100",
+      points: 0,
+      severity: "none",
+      reason: `${classify(GLUCOSE_REFERENCE, g).statusText}. Values below 100 mg/dL do not add points (very low values are checked by the safety warnings).`,
+    });
+  },
+
+  /* HbA1c: >=6.5 -> 3, 5.7-6.4 -> 1, otherwise 0 */
+  (_d, n) => {
+    const meta: FactorMeta = {
+      id: "hba1c",
+      label: "HbA1c",
+      category: "measurement",
+      maxPoints: 3,
+      sourceFields: ["hba1c"],
+      citation: HBA1C_REFERENCE.citation,
+    };
+    if (n.hba1c === null) return notGiven(meta, "No HbA1c value was entered.");
+    const value = `${n.hba1c} %`;
+    if (n.hba1c >= 6.5)
+      return provided(meta, value, {
+        ruleId: "hba1c.gte-6.5",
+        points: 3,
+        severity: "high",
+        reason: "6.5% or above - elevated compared with the reference range.",
+      });
+    if (n.hba1c >= 5.7)
+      return provided(meta, value, {
+        ruleId: "hba1c.5.7-6.4",
+        points: 1,
+        severity: "mild",
+        reason: "5.7-6.4% - borderline (prediabetes range).",
+      });
+    return provided(meta, value, {
+      ruleId: "hba1c.below-5.7",
+      points: 0,
+      severity: "none",
+      reason: "Below 5.7% - within the reference range.",
+    });
+  },
+
+  /* Blood pressure (needs both numbers): >=140 or >=90 -> 2, >=130 or >=80 -> 1 */
+  (_d, n) => {
+    const meta: FactorMeta = {
+      id: "bloodPressure",
+      label: "Blood pressure",
+      category: "measurement",
+      maxPoints: 2,
+      sourceFields: ["systolic", "diastolic"],
+      citation: BLOOD_PRESSURE_REFERENCE.citation,
+    };
+    if (n.systolic === null || n.diastolic === null) {
+      const partial = n.systolic !== null || n.diastolic !== null;
+      return notGiven(
+        meta,
+        partial
+          ? "Only one blood pressure number was entered - both systolic and diastolic are needed."
+          : "No blood pressure reading was entered.",
+      );
+    }
+    const s = n.systolic;
+    const d = n.diastolic;
+    const value = `${s}/${d} mmHg`;
+    if (s >= 140 || d >= 90)
+      return provided(meta, value, {
+        ruleId: "bp.stage2",
+        points: 2,
+        severity: "moderate",
+        reason: "Systolic 140+ or diastolic 90+ - in the stage 2 range or above.",
+      });
+    if (s >= 130 || d >= 80)
+      return provided(meta, value, {
+        ruleId: "bp.stage1",
+        points: 1,
+        severity: "mild",
+        reason: "Systolic 130-139 or diastolic 80-89 - in the stage 1 range.",
+      });
+    if (s >= 120)
+      return provided(meta, value, {
+        ruleId: "bp.elevated",
+        points: 0,
+        severity: "none",
+        reason: "Systolic 120-129 - in the elevated range. This range does not add points.",
+      });
+    return provided(meta, value, {
+      ruleId: "bp.below-120-80",
+      points: 0,
+      severity: "none",
+      reason: "Below 120/80 - within the reference range.",
+    });
+  },
+
+  /* BMI (from height + weight): >=30 -> 2, 25-29.9 -> 1, otherwise 0 */
+  (_d, n) => {
+    const meta: FactorMeta = {
+      id: "bmi",
+      label: "BMI",
+      category: "measurement",
+      maxPoints: 2,
+      sourceFields: ["height", "weight"],
+      citation: BMI_REFERENCE.citation,
+    };
+    if (n.bmi === null)
+      return notGiven(meta, "BMI needs both height and weight to be entered.");
+    const value = n.bmi.toFixed(1);
+    if (n.bmi >= 30)
+      return provided(meta, value, {
+        ruleId: "bmi.gte-30",
+        points: 2,
+        severity: "moderate",
+        reason: "30 or above - well above the healthy-weight range (WHO).",
+      });
+    if (n.bmi >= 25)
+      return provided(meta, value, {
+        ruleId: "bmi.25-29.9",
+        points: 1,
+        severity: "mild",
+        reason: "25-29.9 - above the healthy-weight range (WHO).",
+      });
+    return provided(meta, value, {
+      ruleId: "bmi.below-25",
+      points: 0,
+      severity: "none",
+      reason: `${classify(BMI_REFERENCE, n.bmi).statusText}. BMI below 25 does not add points.`,
+    });
+  },
+
+  /*
+   * Symptoms: 4+ -> 2, 2-3 -> 1. The checklist is always part of the form, so
+   * "none selected" is treated as an answer (provided), not as missing data.
+   * Free-text "other symptoms" are shown to the user but never scored.
+   */
+  (d) => {
+    const meta: FactorMeta = {
+      id: "symptoms",
+      label: "Symptoms",
+      category: "symptom",
+      maxPoints: 2,
+      sourceFields: ["symptoms"],
+    };
+    const count = d.symptoms.length;
+    const value = count === 0 ? "None selected" : `${count} selected`;
+    if (count >= 4)
+      return provided(meta, value, {
+        ruleId: "symptoms.gte-4",
+        points: 2,
+        severity: "moderate",
+        reason: "4 or more diabetes-related symptoms selected.",
+      });
+    if (count >= 2)
+      return provided(meta, value, {
+        ruleId: "symptoms.2-3",
+        points: 1,
+        severity: "mild",
+        reason: "2-3 diabetes-related symptoms selected.",
+      });
+    return provided(meta, value, {
+      ruleId: "symptoms.0-1",
+      points: 0,
+      severity: "none",
+      reason: "Fewer than 2 symptoms selected - this does not add points.",
+    });
+  },
+
+  /* Family history: "Yes" -> 1 */
+  (d) =>
+    answerRule(
+      {
+        id: "familyHistory",
+        label: "Family history",
+        category: "history",
+        maxPoints: 1,
+        sourceFields: ["familyHistory"],
+      },
+      d.familyHistory,
+      d.familyHistory === "Yes",
+      "A close relative with diabetes can increase risk.",
+    ),
+
+  /* Diabetes status: "Yes" or "Not sure" -> 1 */
+  (d) =>
+    answerRule(
+      {
+        id: "diabetesStatus",
+        label: "Existing diabetes",
+        category: "history",
+        maxPoints: 1,
+        sourceFields: ["diabetesStatus"],
+      },
+      d.diabetesStatus,
+      d.diabetesStatus === "Yes" || d.diabetesStatus === "Not sure",
+      d.diabetesStatus === "Yes"
+        ? "You reported an existing diabetes diagnosis."
+        : "You were not sure whether you have been told you have diabetes.",
+    ),
+
+  /* Age: 45 or above -> 1 */
+  (_d, n) => {
+    const meta: FactorMeta = {
+      id: "age",
+      label: "Age",
+      category: "demographic",
+      maxPoints: 1,
+      sourceFields: ["age"],
+    };
+    if (n.age === null) return notGiven(meta, "Age was not entered.");
+    const value = `${n.age} years`;
+    return n.age >= 45
+      ? provided(meta, value, {
+          ruleId: "age.gte-45",
+          points: 1,
+          severity: "mild",
+          reason: "Age 45 or above - type 2 diabetes risk rises with age.",
+        })
+      : provided(meta, value, {
+          ruleId: "age.below-45",
+          points: 0,
+          severity: "none",
+          reason: "Under 45 - age does not add points.",
+        });
+  },
+
+  /* Activity: "Sedentary" -> 1 */
+  (d) =>
+    answerRule(
+      {
+        id: "activity",
+        label: "Physical activity",
+        category: "lifestyle",
+        maxPoints: 1,
+        sourceFields: ["activityLevel"],
+      },
+      d.activityLevel,
+      d.activityLevel === "Sedentary",
+      "A sedentary activity level - regular activity supports healthy glucose management.",
+    ),
+
+  /* Smoking: "Yes" -> 1 (former smokers score 0, as in 1.0.0) */
+  (d) =>
+    answerRule(
+      {
+        id: "smoking",
+        label: "Smoking",
+        category: "lifestyle",
+        maxPoints: 1,
+        sourceFields: ["smoking"],
+      },
+      d.smoking,
+      d.smoking === "Yes",
+      "Current smoking is linked to a higher risk of type 2 diabetes and its complications.",
+    ),
+
+  /* Diet: "Often high in sugary food or drinks" -> 1 */
+  (d) =>
+    answerRule(
+      {
+        id: "diet",
+        label: "Diet pattern",
+        category: "lifestyle",
+        maxPoints: 1,
+        sourceFields: ["dietPattern"],
+      },
+      d.dietPattern,
+      d.dietPattern === "Often high in sugary food or drinks",
+      "A diet often high in sugary food or drinks.",
+    ),
+];
+
+/**
+ * Shared rule for one-point multiple-choice answers.
+ * Blank answer -> not provided; the scored answer -> 1 point; anything else -> 0.
+ */
+function answerRule(
+  meta: FactorMeta,
+  answer: string,
+  scores: boolean,
+  scoredReason: string,
+): ScoreFactor {
+  if (answer === "") return notGiven(meta, `${meta.label} was not answered.`);
+  const slug = answer.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+  return provided(
+    meta,
+    answer,
+    scores
+      ? { ruleId: `${meta.id}.${slug}`, points: 1, severity: "mild", reason: scoredReason }
+      : {
+          ruleId: `${meta.id}.${slug}`,
+          points: 0,
+          severity: "none",
+          reason: `"${answer}" does not add points.`,
+        },
+  );
+}
+
+/** Run every scoring rule. Exported so later features (history, what-if) reuse it. */
+export function scoreFactors(data: AssessmentData): ScoreFactor[] {
+  const parsed: ParsedInputs = {
+    glucose: toNumber(data.glucose),
+    hba1c: toNumber(data.hba1c),
+    systolic: toNumber(data.systolic),
+    diastolic: toNumber(data.diastolic),
+    bmi: calculateBMI(data.height, data.weight),
+    age: toNumber(data.age),
+  };
+  return SCORING_RULES.map((rule) => rule(data, parsed));
+}
+
+function concernFromScore(score: number): ConcernLevel {
+  if (score >= LEVEL_THRESHOLDS.high) return "High";
+  if (score >= LEVEL_THRESHOLDS.moderate) return "Moderate";
   return "Low";
+}
+
+/**
+ * Final level. An urgent safety status ALWAYS forces "High", whatever the
+ * score - the basis records this so the UI can say why. The score itself is
+ * never changed by a safety trigger (no extra points).
+ */
+function decideLevel(
+  score: number,
+  safety: SafetyStatus,
+): { level: ConcernLevel; basis: LevelBasis } {
+  const scoreLevel = concernFromScore(score);
+  const thresholds = { ...LEVEL_THRESHOLDS };
+  if (safety.isUrgent) {
+    return {
+      level: "High",
+      basis: {
+        type: "red-flag",
+        thresholds,
+        ruleIds: [...safety.triggeredRules],
+        scoreLevel,
+      },
+    };
+  }
+  return { level: scoreLevel, basis: { type: "score", thresholds } };
 }
 
 const CONCERN_SUMMARY: Record<ConcernLevel, string> = {
@@ -415,9 +818,18 @@ export function runAssessment(data: AssessmentData): AssessmentResult {
     bmiIndicator(bmi),
   ];
 
-  const redFlags = checkRedFlags(data);
-  const concernScore = scoreConcern(data, glucose, hba1c, systolic, diastolic, bmi);
-  const concernLevel = concernFromScore(concernScore, redFlags.length > 0);
+  // 1. Safety first - evaluated from the raw input, independent of the score.
+  //    This is the ONE safety evaluation; everything else reads from it.
+  const safety = evaluateSafety(data);
+  const redFlags: RedFlag[] = safety.triggers.map((t) => ({ id: t.ruleId, reason: t.reason }));
+
+  // 2. Scoring. The score is DEFINED as the sum of the factors.
+  const factors = scoreFactors(data);
+  const concernScore = factors.reduce((sum, f) => sum + f.points, 0);
+  const maxScore = factors.reduce((sum, f) => sum + f.maxPoints, 0);
+
+  // 3. Final level: safety override, otherwise the score thresholds.
+  const { level: concernLevel, basis: levelBasis } = decideLevel(concernScore, safety);
 
   const riskFactors = collectRiskFactors(data, indicators);
   const recommendations = buildRecommendations(data, indicators, concernLevel);
@@ -436,7 +848,11 @@ export function runAssessment(data: AssessmentData): AssessmentResult {
     engineVersion: ENGINE_VERSION,
     concernLevel,
     concernScore,
+    maxScore,
     concernSummary: CONCERN_SUMMARY[concernLevel],
+    factors,
+    levelBasis,
+    safety,
     indicators,
     riskFactors,
     redFlags,

@@ -106,9 +106,12 @@ It supports **Gemini, Groq or Anthropic** (not Ollama - that is local only).
 cd gluco-care
 supabase login
 supabase link --project-ref <your-project-ref>
-supabase functions deploy explain-results --no-verify-jwt
+# JWT verification stays ON (default): only GlucoCare visitors with a session can call it
+supabase functions deploy explain-results
+# REQUIRED: the website address(es) allowed to call the function
+supabase secrets set AI_ALLOWED_ORIGINS=https://your-site.example
 # set ONE of these:
-supabase secrets set AI_PROVIDER=gemini GEMINI_API_KEY=AIza...
+supabase secrets set AI_PROVIDER=gemini GEMINI_API_KEY=<your-key>
 # or: supabase secrets set AI_PROVIDER=groq GROQ_API_KEY=gsk_...
 ```
 

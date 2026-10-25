@@ -1,5 +1,6 @@
 /**
- * GlucoCare - medical report types (Stage 6)
+ * GlucoCare - medical report file constraints.
+ * Report records and extracted values are in types/health.ts (Phase 8).
  */
 
 export const ACCEPTED_REPORT_TYPES = [
@@ -9,27 +10,3 @@ export const ACCEPTED_REPORT_TYPES = [
 ] as const;
 
 export const MAX_REPORT_SIZE_MB = 10;
-
-export interface ReportFileInfo {
-  name: string;
-  sizeBytes: number;
-  type: string;
-}
-
-/** Values a user can OPTIONALLY copy from their own report by hand (Stage 6). */
-export interface ManualReportValues {
-  glucose: string;
-  hba1c: string;
-  systolic: string;
-  diastolic: string;
-}
-
-export type ReportExtractionStatus =
-  | "not-implemented" // automatic reading is a Proposed Feature
-  | "manual-entry"
-  | "error";
-
-export interface ReportExtractionResult {
-  status: ReportExtractionStatus;
-  message: string;
-}

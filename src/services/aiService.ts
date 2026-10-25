@@ -21,7 +21,36 @@ import type { SafetyStatus } from "../types/safety";
 import { validateAiResponse } from "../lib/aiGuard";
 import { supabase } from "./supabaseClient";
 
-const FUNCTION_URL = import.meta.env.VITE_AI_FUNCTION_URL as string | undefined;
+const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\])$/i;
+
+/**
+ * Picks the AI endpoint. A localhost URL (the dev proxy) is unreachable from a
+ * deployed site, so when the page itself is NOT on localhost and Supabase is
+ * configured, the deployed Edge Function is used instead. This keeps a
+ * hosting setup that copied the local .env working.
+ */
+export function resolveAiUrl(
+  configured: string | undefined,
+  supabaseUrl: string | undefined,
+  pageHost: string | undefined,
+): string | undefined {
+  const edge = supabaseUrl ? `${supabaseUrl.replace(/\/+$/, "")}/functions/v1/explain-results` : undefined;
+  if (!configured) return undefined;
+  let host: string;
+  try {
+    host = new URL(configured).hostname;
+  } catch {
+    return configured;
+  }
+  const pageIsLocal = pageHost === undefined || LOCAL_HOST.test(pageHost);
+  return LOCAL_HOST.test(host) && !pageIsLocal && edge ? edge : configured;
+}
+
+const FUNCTION_URL = resolveAiUrl(
+  import.meta.env.VITE_AI_FUNCTION_URL as string | undefined,
+  import.meta.env.VITE_SUPABASE_URL as string | undefined,
+  typeof window === "undefined" ? undefined : window.location.hostname,
+);
 
 export const isAiConfigured = Boolean(FUNCTION_URL);
 
@@ -60,7 +89,7 @@ export async function explainResults(
   try {
     const response = await fetch(FUNCTION_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...(await authHeader()) },
       body: JSON.stringify({
         concernLevel: request.result.concernLevel,
         indicators: request.result.indicators.map((i) => ({
@@ -126,13 +155,25 @@ function errorResult(message: string): AiExplanation {
 
 const AI_TIMEOUT_MS = 30_000;
 
+let signInPromise: Promise<string | undefined> | null = null;
+
 async function authHeader(): Promise<Record<string, string>> {
   // When deployed as a Supabase Edge Function, the function verifies this
-  // (anonymous or signed-in) user token. The local proxy ignores it.
-  if (!supabase) return {};
+  // (anonymous or signed-in) user token - so a visitor without a session yet
+  // gets one anonymous sign-in (shared by concurrent calls). The local proxy
+  // ignores the header.
+  const client = supabase;
+  if (!client) return {};
   try {
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
+    const { data } = await client.auth.getSession();
+    let token = data.session?.access_token;
+    if (!token) {
+      signInPromise ??= client.auth
+        .signInAnonymously()
+        .then(({ data: d }) => d.session?.access_token)
+        .finally(() => (signInPromise = null));
+      token = await signInPromise;
+    }
     return token ? { Authorization: `Bearer ${token}` } : {};
   } catch {
     return {};

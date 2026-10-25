@@ -77,3 +77,29 @@ describe("explainWithEvidence (AI v2)", () => {
     expect((await explainWithEvidence(evidence, result.safety)).status).toBe("blocked");
   });
 });
+
+describe("resolveAiUrl", () => {
+  const LOCAL = "http://localhost:8787/api/explain-results";
+  const SB = "https://abc.supabase.co";
+  const EDGE = "https://abc.supabase.co/functions/v1/explain-results";
+
+  it("deployed site with a localhost AI URL uses the Supabase Edge Function", async () => {
+    const { resolveAiUrl } = await import("./aiService");
+    expect(resolveAiUrl(LOCAL, SB, "gluco-care-nu.vercel.app")).toBe(EDGE);
+    expect(resolveAiUrl(LOCAL, `${SB}/`, "example.com")).toBe(EDGE);
+  });
+
+  it("keeps the localhost proxy during local development", async () => {
+    const { resolveAiUrl } = await import("./aiService");
+    expect(resolveAiUrl(LOCAL, SB, "localhost")).toBe(LOCAL);
+    expect(resolveAiUrl(LOCAL, SB, "127.0.0.1")).toBe(LOCAL);
+    expect(resolveAiUrl(LOCAL, SB, undefined)).toBe(LOCAL);
+  });
+
+  it("keeps an explicit non-local URL, and stays unconfigured when nothing is set", async () => {
+    const { resolveAiUrl } = await import("./aiService");
+    expect(resolveAiUrl(EDGE, SB, "example.com")).toBe(EDGE);
+    expect(resolveAiUrl(LOCAL, undefined, "example.com")).toBe(LOCAL);
+    expect(resolveAiUrl(undefined, SB, "example.com")).toBeUndefined();
+  });
+});

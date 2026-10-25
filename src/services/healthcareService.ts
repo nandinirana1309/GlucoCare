@@ -189,13 +189,23 @@ out center tags 60;`;
 }
 
 /** Per-server wait. Short, because the Photon backup is tried if all fail. */
-const OVERPASS_TIMEOUT_MS = 12000;
+const OVERPASS_TIMEOUT_MS = 6000;
+/** Total wait for ALL servers together, so a failing Overpass costs seconds, not minutes. */
+const OVERPASS_BUDGET_MS = 9000;
+/** If Overpass has not answered by then, the Photon backup starts in parallel. */
+const BACKUP_HEAD_START_MS = 4000;
 
 /** POST the query to each endpoint until one returns valid JSON. */
 async function runOverpass(query: string): Promise<OverpassElement[]> {
   let lastReason = "";
+  const deadline = Date.now() + OVERPASS_BUDGET_MS;
 
   for (const endpoint of OVERPASS_ENDPOINTS) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      lastReason = "timed out";
+      break;
+    }
     try {
       const res = await fetchWithTimeout(
         endpoint,
@@ -204,7 +214,7 @@ async function runOverpass(query: string): Promise<OverpassElement[]> {
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
           body: `data=${encodeURIComponent(query)}`,
         },
-        OVERPASS_TIMEOUT_MS,
+        Math.min(OVERPASS_TIMEOUT_MS, remaining),
       );
 
       if (!res.ok) {
@@ -341,6 +351,11 @@ export async function findFacilitiesViaPhoton(origin: GeoPoint, radiusKm = 15): 
 }
 
 export async function findFacilities(origin: GeoPoint): Promise<Facility[]> {
+  // The backup starts early when Overpass is slow, so it is ready if Overpass
+  // fails. A fast Overpass answer never touches Photon.
+  let backup: Promise<Facility[]> | null = null;
+  const startBackup = () => (backup ??= findFacilitiesViaPhoton(origin));
+  const backupTimer = setTimeout(() => void startBackup().catch(() => {}), BACKUP_HEAD_START_MS);
   try {
     // First pass: 7 km.
     let elements = await runOverpass(overpassQuery(origin.lat, origin.lon, 7000));
@@ -355,9 +370,11 @@ export async function findFacilities(origin: GeoPoint): Promise<Facility[]> {
   } catch (overpassError) {
     // Every Overpass server failed: use the Photon backup before giving up.
     try {
-      return await findFacilitiesViaPhoton(origin);
+      return await startBackup();
     } catch {
       throw overpassError;
     }
+  } finally {
+    clearTimeout(backupTimer);
   }
 }

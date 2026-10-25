@@ -64,6 +64,33 @@ describe("findFacilities", () => {
     await expect(findFacilities(ORIGIN)).rejects.toThrow(/busy right now \(server 503\)/);
   });
 
+  it("hanging Overpass servers cost at most ~9 s; the backup starts early in parallel", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      const fetchSpy = vi.fn((url: string, init?: RequestInit) => {
+        if (isPhoton(url)) {
+          const kind = /osm_tag=amenity:(\w+)/.exec(url)![1];
+          return Promise.resolve(json(photon(kind, `Test ${kind}`)));
+        }
+        // Overpass never answers - only the abort ends the request.
+        return new Promise<Response>((_, reject) =>
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))),
+        );
+      });
+      vi.stubGlobal("fetch", fetchSpy);
+      let found: Awaited<ReturnType<typeof findFacilities>> | undefined;
+      void findFacilities(ORIGIN).then((f) => (found = f));
+      await vi.advanceTimersByTimeAsync(4500);
+      expect(fetchSpy.mock.calls.some(([u]) => isPhoton(u as string))).toBe(true); // backup already running
+      expect(found).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(5000); // 9.5 s in total
+      expect(found?.map((x) => x.category).sort()).toEqual(["Clinic", "Doctor", "Hospital", "Pharmacy"]);
+      expect(fetchSpy.mock.calls.filter(([u]) => !isPhoton(u as string))).toHaveLength(2); // 6 s + 3 s, third server skipped
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("an empty but successful Overpass answer is NOT replaced by the backup", async () => {
     const fetchSpy = vi.fn(async (url: string) => (isPhoton(url) ? json(photon("hospital", "x")) : json({ elements: [] })));
     vi.stubGlobal("fetch", fetchSpy);

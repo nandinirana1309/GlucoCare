@@ -6,11 +6,14 @@
  *                            Photon as a fallback)
  *   2. findFacilities()    -> find hospitals / clinics / doctors nearby
  *                            (Overpass API - several public servers are tried
- *                            in turn because any single one is often overloaded)
+ *                            in turn because any single one is often overloaded;
+ *                            if ALL of them fail, Photon's OpenStreetMap search
+ *                            is used as a backup)
  *
  * Notes:
  *   - Public Overpass servers frequently return 429/504 or time out. This
- *     module tries a list of them and only fails if every one fails.
+ *     module tries a list of them, then the Photon backup, and only fails if
+ *     every source fails.
  *   - Results depend on what volunteers have mapped, so some places may be
  *     missing or lack a phone number. Always show
  *     "(c) OpenStreetMap contributors".
@@ -185,59 +188,48 @@ function overpassQuery(lat: number, lon: number, radiusM: number): string {
 out center tags 60;`;
 }
 
-/** HTTP statuses meaning "busy, try again shortly" (Overpass asks clients to back off). */
-const BUSY = new Set([429, 502, 503, 504]);
-const RETRY_DELAY_MS = 3000;
+/** Per-server wait. Short, because the Photon backup is tried if all fail. */
+const OVERPASS_TIMEOUT_MS = 12000;
 
-/**
- * POST the query to each endpoint until one returns valid JSON. If every
- * server failed and at least one said it was busy, wait briefly and try the
- * list once more (Overpass recommends retrying with a back-off).
- */
+/** POST the query to each endpoint until one returns valid JSON. */
 async function runOverpass(query: string): Promise<OverpassElement[]> {
   let lastReason = "";
 
-  for (let round = 0; round < 2; round++) {
-    let sawBusy = false;
-    for (const endpoint of OVERPASS_ENDPOINTS) {
-      try {
-        const res = await fetchWithTimeout(
-          endpoint,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded" },
-            body: `data=${encodeURIComponent(query)}`,
-          },
-          20000,
-        );
+  for (const endpoint of OVERPASS_ENDPOINTS) {
+    try {
+      const res = await fetchWithTimeout(
+        endpoint,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: `data=${encodeURIComponent(query)}`,
+        },
+        OVERPASS_TIMEOUT_MS,
+      );
 
-        if (!res.ok) {
-          lastReason = `server ${res.status}`;
-          if (BUSY.has(res.status)) sawBusy = true;
-          continue;
-        }
-
-        const contentType = res.headers.get("content-type") ?? "";
-        if (!contentType.includes("json")) {
-          lastReason = "non-JSON response";
-          continue;
-        }
-
-        const payload = (await res.json()) as { elements?: OverpassElement[] };
-        if (!Array.isArray(payload.elements)) {
-          lastReason = "unexpected response shape";
-          continue;
-        }
-        return payload.elements;
-      } catch (error) {
-        lastReason =
-          error instanceof DOMException && error.name === "AbortError"
-            ? "timed out"
-            : "network error";
+      if (!res.ok) {
+        lastReason = `server ${res.status}`;
+        continue;
       }
+
+      const contentType = res.headers.get("content-type") ?? "";
+      if (!contentType.includes("json")) {
+        lastReason = "non-JSON response";
+        continue;
+      }
+
+      const payload = (await res.json()) as { elements?: OverpassElement[] };
+      if (!Array.isArray(payload.elements)) {
+        lastReason = "unexpected response shape";
+        continue;
+      }
+      return payload.elements;
+    } catch (error) {
+      lastReason =
+        error instanceof DOMException && error.name === "AbortError"
+          ? "timed out"
+          : "network error";
     }
-    if (!sawBusy || round === 1) break;
-    await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
   }
 
   throw new Error(
@@ -283,16 +275,89 @@ function toFacilities(
   return facilities.slice(0, 24);
 }
 
-export async function findFacilities(origin: GeoPoint): Promise<Facility[]> {
-  // First pass: 7 km.
-  let elements = await runOverpass(overpassQuery(origin.lat, origin.lon, 7000));
-  let facilities = toFacilities(elements, origin);
+/* ------------------------------------------------------------------ */
+/*  3. backup: Photon (OpenStreetMap search by komoot)                 */
+/* ------------------------------------------------------------------ */
 
-  // Nothing mapped nearby -> widen the search once to 15 km.
-  if (facilities.length === 0) {
-    elements = await runOverpass(overpassQuery(origin.lat, origin.lon, 15000));
-    facilities = toFacilities(elements, origin);
+const PHOTON_CATEGORIES: { query: string; tag: string }[] = [
+  { query: "hospital", tag: "amenity:hospital" },
+  { query: "clinic", tag: "amenity:clinic" },
+  { query: "doctor", tag: "amenity:doctors" },
+  { query: "pharmacy", tag: "amenity:pharmacy" },
+];
+
+const OSM_TYPE: Record<string, OverpassElement["type"]> = { N: "node", W: "way", R: "relation" };
+
+interface PhotonFeature {
+  geometry: { coordinates: [number, number] };
+  properties: Record<string, string | number | undefined>;
+}
+
+/**
+ * Nearby facilities from Photon, used when every Overpass server fails.
+ * Photon searches the same OpenStreetMap data; results are limited to
+ * `radiusKm` and converted to the same Facility shape.
+ */
+export async function findFacilitiesViaPhoton(origin: GeoPoint, radiusKm = 15): Promise<Facility[]> {
+  const responses = await Promise.all(
+    PHOTON_CATEGORIES.map(async ({ query, tag }) => {
+      try {
+        const url = `${PHOTON}?q=${query}&lat=${origin.lat}&lon=${origin.lon}&limit=25&osm_tag=${tag}`;
+        const res = await fetchWithTimeout(url, { headers: { Accept: "application/json" } }, 12000);
+        if (!res.ok) return null;
+        return ((await res.json()) as { features?: PhotonFeature[] }).features ?? [];
+      } catch {
+        return null;
+      }
+    }),
+  );
+  if (responses.every((r) => r === null)) {
+    throw new Error("The backup facility search is unavailable.");
   }
 
-  return facilities;
+  const elements: OverpassElement[] = responses
+    .flatMap((features) => features ?? [])
+    .map((f) => {
+      const p = f.properties;
+      const [lon, lat] = f.geometry.coordinates;
+      const tags: Record<string, string> = {};
+      if (p.osm_key && p.osm_value) tags[String(p.osm_key)] = String(p.osm_value);
+      if (p.name) tags.name = String(p.name);
+      if (p.housenumber) tags["addr:housenumber"] = String(p.housenumber);
+      if (p.street) tags["addr:street"] = String(p.street);
+      if (p.district) tags["addr:suburb"] = String(p.district);
+      if (p.city) tags["addr:city"] = String(p.city);
+      if (p.state) tags["addr:state"] = String(p.state);
+      return {
+        type: OSM_TYPE[String(p.osm_type)] ?? "node",
+        id: Number(p.osm_id) || 0,
+        lat,
+        lon,
+        tags,
+      };
+    });
+
+  return toFacilities(elements, origin).filter((f) => f.distanceKm <= radiusKm);
+}
+
+export async function findFacilities(origin: GeoPoint): Promise<Facility[]> {
+  try {
+    // First pass: 7 km.
+    let elements = await runOverpass(overpassQuery(origin.lat, origin.lon, 7000));
+    let facilities = toFacilities(elements, origin);
+
+    // Nothing mapped nearby -> widen the search once to 15 km.
+    if (facilities.length === 0) {
+      elements = await runOverpass(overpassQuery(origin.lat, origin.lon, 15000));
+      facilities = toFacilities(elements, origin);
+    }
+    return facilities;
+  } catch (overpassError) {
+    // Every Overpass server failed: use the Photon backup before giving up.
+    try {
+      return await findFacilitiesViaPhoton(origin);
+    } catch {
+      throw overpassError;
+    }
+  }
 }
